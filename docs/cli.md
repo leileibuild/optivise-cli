@@ -7,8 +7,10 @@ See [Problem-agnostic v3 API](problem_agnostic_api.md) and [OpenAPI v3](../opena
 ## Quick start
 
 ```bash
+# Backend URL (required). Sign-in is optional for anonymous v3 usage.
 npx smart-planner login --backend-url http://localhost:8000
 
+# Or set once: export SMART_PLANNER_BACKEND_URL=http://localhost:8000
 npx smart-planner models list --format json
 npx smart-planner spec --model-id capacity-planning@sha256:3c52f6d1
 
@@ -44,7 +46,7 @@ The server re-validates on every solve; a prior validate run is advisory only.
 | `init --model-id <id>` | templates + scaffold | Create project with CSV templates |
 | `validate [--model-id] [--data-dir]` | `POST /v3/runs` validate | Parse, validate, build (no solver) |
 | `solve [--model-id] [--data-dir] [--out-dir]` | `POST /v3/runs` solve | Solve + download result CSVs |
-| `login` / `whoami` / `logout` | — | Backend URL + Bearer identity |
+| `login` / `whoami` / `logout` | `/v3/auth/device/*` | Browser sign-in + session; anonymous OK without login |
 
 ## Project layout
 
@@ -74,8 +76,13 @@ Matches the v3 configuration envelope (model-specific JSON Schema is authoritati
 
 ## Authentication
 
-- `login` saves `backendUrl` and registers HMAC identity (`/v1/cli/register`).
-- **v3** sends `Authorization: Bearer <client_id>` when the server has `SMART_PLANNER_V3_AUTH_ENABLED=1`; local dev often runs with auth disabled.
+- **Anonymous by default:** `validate`, `solve`, `models`, etc. work without login when the server allows anonymous v3 access (default). Set backend URL once via `login --backend-url` or `SMART_PLANNER_BACKEND_URL`.
+- **`login`:** opens `/auth` in your browser (Google, WeChat, or local dev sign-in), polls device authorization, then saves:
+  - `~/.smartplanner/session.json` — Bearer token for `/v3`
+  - `~/.smartplanner/identity.json` — HMAC credentials for legacy `/v1` CLI routes
+- **`whoami`:** prints `principal_id` when logged in, otherwise `anonymous`.
+- **`logout`:** clears session and HMAC identity.
+- Server env: `SMART_PLANNER_V3_AUTH_ENABLED=1` requires a valid Bearer on v3 routes; anonymous is blocked in that mode. Local dev: `SMART_PLANNER_LOCAL_AUTH=1` + `SMART_PLANNER_LOCAL_AUTH_TOKEN` (see `.env.example`).
 
 ## Validation errors
 

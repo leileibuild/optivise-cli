@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
-import type { Identity, UserConfig } from './auth.js';
+import type { Session, UserConfig } from './auth.js';
 import {
   collectCsvFiles,
   discoverCsvFiles,
@@ -125,11 +125,11 @@ export async function runV3Validate(options: {
   modelId: string;
   dataDir: string;
   configPath?: string;
-  identity?: Identity;
+  session?: Session | null;
   userConfig: UserConfig;
   verbose?: boolean;
 }): Promise<V3ValidateResult> {
-  const client = new V3ApiClient(options.userConfig, options.identity);
+  const client = new V3ApiClient(options.userConfig, options.session);
   const csvFiles = await resolveCsvFiles(options.dataDir, options.modelId, client);
   const config = loadRunConfig(options.configPath);
 
@@ -170,11 +170,11 @@ export async function runV3Solve(options: {
   dataDir: string;
   configPath?: string;
   outDir?: string;
-  identity?: Identity;
+  session?: Session | null;
   userConfig: UserConfig;
   verbose?: boolean;
 }): Promise<{ run: V3Run; outputFiles: string[] }> {
-  const client = new V3ApiClient(options.userConfig, options.identity);
+  const client = new V3ApiClient(options.userConfig, options.session);
   const csvFiles = await resolveCsvFiles(options.dataDir, options.modelId, client);
   const config = loadRunConfig(options.configPath);
 
@@ -232,9 +232,9 @@ export async function scaffoldV3Project(
   userConfig: UserConfig,
   modelId: string,
   targetDir: string,
-  identity?: Identity,
+  session?: Session | null,
 ): Promise<void> {
-  const client = new V3ApiClient(userConfig, identity);
+  const client = new V3ApiClient(userConfig, session);
   const descriptor = await client.getModel(modelId);
   mkdirSync(join(targetDir, 'data'), { recursive: true });
 

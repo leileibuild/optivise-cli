@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
-import type { Identity, UserConfig } from './auth.js';
+import type { Session, UserConfig } from './auth.js';
 
 export interface V3ModelSummary {
   model_id: string;
@@ -70,7 +70,7 @@ export interface CreateV3RunRequest {
 export class V3ApiClient {
   constructor(
     private readonly config: UserConfig,
-    private readonly identity?: Identity,
+    private readonly session?: Session | null,
   ) {}
 
   private url(path: string): string {
@@ -78,10 +78,10 @@ export class V3ApiClient {
   }
 
   private authHeaders(): Record<string, string> {
-    if (!this.identity) {
-      return {};
+    if (this.session?.accessToken) {
+      return { Authorization: `Bearer ${this.session.accessToken}` };
     }
-    return { Authorization: `Bearer ${this.identity.clientId}` };
+    return {};
   }
 
   async listModels(cursor?: string, limit?: number): Promise<{ models: V3ModelSummary[]; next_cursor: string | null }> {

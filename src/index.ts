@@ -4,17 +4,15 @@ import { resolve } from 'node:path';
 import { Command } from 'commander';
 
 import { toAgentSpecBundle } from './agent-spec.js';
-import { ApiClient } from './api-client.js';
 import {
-  deleteIdentity,
-  generateIdentity,
-  loadConfig,
+  clearCredentials,
   loadIdentity,
+  loadSession,
+  resolveBackendUrl,
   saveConfig,
-  saveIdentity,
-  type Identity,
   type UserConfig,
 } from './auth.js';
+import { loginWithBrowser, sessionSummary } from './login.js';
 import { V3ApiClient } from './v3-client.js';
 import {
   formatV3Error,
@@ -34,13 +32,21 @@ program
   .description('Smart Planner CLI — CSV datasets, immutable models, /v3 runs')
   .version('0.3.0');
 
-function requireBackend(): { config: UserConfig; identity: Identity | undefined } {
-  const config = loadConfig();
-  if (!config) {
-    console.error('Not configured. Run: smart-planner login --backend-url <url>');
+function getClientContext(explicitBackendUrl?: string): {
+  config: UserConfig;
+  session: ReturnType<typeof loadSession>;
+  identity: ReturnType<typeof loadIdentity>;
+} {
+  try {
+    return {
+      config: resolveBackendUrl(explicitBackendUrl),
+      session: loadSession(),
+      identity: loadIdentity(),
+    };
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
     process.exit(3);
   }
-  return { config, identity: loadIdentity() ?? undefined };
 }
 
 const modelsCmd = program.command('models').description('Discover immutable models and CSV templates');
@@ -51,8 +57,8 @@ modelsCmd
   .option('--format <fmt>', 'json or text', 'text')
   .option('--all', 'Fetch all pages')
   .action(async (opts: { format: string; all?: boolean }) => {
-    const { config, identity } = requireBackend();
-    const client = new V3ApiClient(config, identity);
+    const { config, session } = getClientContext();
+    const client = new V3ApiClient(config, session);
     const models = [];
     let cursor: string | undefined;
     do {
@@ -76,10 +82,10 @@ modelsCmd
   .option('--format <fmt>', 'json or text', 'json')
   .description('Model descriptor (GET /v3/models/{model_id})')
   .action(async (opts: { modelId?: string; format: string }) => {
-    const { config, identity } = requireBackend();
+    const { config, session } = getClientContext();
     const projectRoot = process.cwd();
     const modelId = resolveModelId(projectRoot, opts.modelId);
-    const client = new V3ApiClient(config, identity);
+    const client = new V3ApiClient(config, session);
     const descriptor = await client.getModel(modelId);
     if (opts.format === 'json') {
       console.log(JSON.stringify(descriptor, null, 2));
@@ -99,8 +105,8 @@ modelsCmd
   .option('--out <path>', 'Output CSV path')
   .description('Download one CSV template')
   .action(async (opts: { modelId: string; dataset: string; out?: string }) => {
-    const { config, identity } = requireBackend();
-    const client = new V3ApiClient(config, identity);
+    const { config, session } = getClientContext();
+    const client = new V3ApiClient(config, session);
     const csv = await client.downloadTemplate(opts.modelId, opts.dataset);
     const outPath = opts.out ?? `${opts.dataset}.csv`;
     writeFileSync(outPath, csv, 'utf8');
@@ -113,10 +119,10 @@ program
   .option('--format <fmt>', 'json or text', 'json')
   .description('Agent-readable spec from server model descriptor')
   .action(async (opts: { modelId?: string; format: string }) => {
-    const { config, identity } = requireBackend();
+    const { config, session } = getClientContext();
     const projectRoot = process.cwd();
     const modelId = resolveModelId(projectRoot, opts.modelId);
-    const client = new V3ApiClient(config, identity);
+    const client = new V3ApiClient(config, session);
     const bundle = toAgentSpecBundle(await client.getModel(modelId));
     if (opts.format === 'json') {
       console.log(JSON.stringify(bundle, null, 2));
@@ -135,9 +141,9 @@ program
   .argument('[dir]', 'Project directory', '.')
   .description('Download CSV templates and scaffold project.yaml + config.json')
   .action(async (dir: string, opts: { modelId: string }) => {
-    const { config, identity } = requireBackend();
+    const { config, session } = getClientContext();
     const target = resolve(process.cwd(), dir);
-    await scaffoldV3Project(config, opts.modelId, target, identity);
+    await scaffoldV3Project(config, opts.modelId, target, session);
     console.log(`Created project at ${target}`);
     console.log(`model_id=${opts.modelId}`);
     console.log('Next: edit data/*.csv, then validate / solve');
@@ -158,14 +164,14 @@ program
     format: string;
     verbose?: boolean;
   }) => {
-    const { config, identity } = requireBackend();
+    const { config, session } = getClientContext();
     const projectRoot = process.cwd();
     const result = await runV3Validate({
       projectRoot,
       modelId: resolveModelId(projectRoot, opts.modelId),
       dataDir: resolveDataDir(projectRoot, opts.dataDir),
       configPath: resolveConfigPath(projectRoot, opts.config),
-      identity,
+      session,
       userConfig: config,
       verbose: opts.verbose,
     });
@@ -199,7 +205,7 @@ program
     format: string;
     verbose?: boolean;
   }) => {
-    const { config, identity } = requireBackend();
+    const { config, session } = getClientContext();
     const projectRoot = process.cwd();
     const { run, outputFiles } = await runV3Solve({
       projectRoot,
@@ -207,7 +213,7 @@ program
       dataDir: resolveDataDir(projectRoot, opts.dataDir),
       configPath: resolveConfigPath(projectRoot, opts.config),
       outDir: opts.outDir,
-      identity,
+      session,
       userConfig: config,
       verbose: opts.verbose,
     });
@@ -230,38 +236,39 @@ program
 program
   .command('login')
   .requiredOption('--backend-url <url>', 'Smart Planner backend URL')
-  .description('Save backend URL and register CLI identity')
+  .description('Open browser sign-in (Google/WeChat) and save session + HMAC credentials')
   .action(async (opts: { backendUrl: string }) => {
-    saveConfig({ backendUrl: opts.backendUrl });
-    let identity = loadIdentity();
-    if (!identity) {
-      identity = generateIdentity();
-      saveIdentity(identity);
-    }
-    const client = new ApiClient({ backendUrl: opts.backendUrl }, identity);
-    await client.register();
+    const config = resolveBackendUrl(opts.backendUrl);
+    saveConfig(config);
+    const session = await loginWithBrowser(config);
     console.log('Logged in');
-    console.log(`client_id=${identity.clientId}`);
+    console.log(`principal_id=${session.principalId}`);
+    if (session.email) {
+      console.log(`email=${session.email}`);
+    }
   });
 
 program
   .command('whoami')
-  .description('Print local client_id (Bearer token for v3 when auth is enabled)')
+  .description('Print current principal (logged in) or anonymous')
   .action(() => {
+    const session = loadSession();
     const identity = loadIdentity();
-    if (!identity) {
-      console.error('Not logged in. Run: smart-planner login --backend-url <url>');
-      process.exit(1);
+    console.log(sessionSummary(session, identity?.clientId));
+    if (session?.email) {
+      console.log(`email=${session.email}`);
     }
-    console.log(identity.clientId);
+    if (!session) {
+      console.log('mode=anonymous');
+    }
   });
 
 program
   .command('logout')
-  .description('Delete local identity file')
+  .description('Clear saved session and HMAC credentials')
   .action(() => {
-    deleteIdentity();
-    console.log('Local identity removed');
+    clearCredentials();
+    console.log('Signed out');
   });
 
 program.parseAsync(process.argv).catch((err: unknown) => {
