@@ -48,6 +48,29 @@ export function resolveDataDir(projectRoot: string, arg?: string): string {
   return resolve(projectRoot, 'data');
 }
 
+export function resolveConfigPath(projectRoot: string, arg?: string): string | undefined {
+  if (arg) {
+    return resolve(projectRoot, arg);
+  }
+  const project = loadProjectYaml(projectRoot);
+  if (typeof project.defaultConfig === 'string') {
+    return resolve(projectRoot, project.defaultConfig);
+  }
+  const defaultPath = join(projectRoot, 'config.json');
+  return existsSync(defaultPath) ? defaultPath : undefined;
+}
+
+export function resolveOutDir(projectRoot: string, arg?: string): string {
+  if (arg) {
+    return resolve(projectRoot, arg);
+  }
+  const project = loadProjectYaml(projectRoot);
+  if (typeof project.outDir === 'string') {
+    return resolve(projectRoot, project.outDir);
+  }
+  return resolve(projectRoot, 'results');
+}
+
 export function loadRunConfig(configPath?: string): Record<string, unknown> {
   if (!configPath) {
     return {};
@@ -60,11 +83,41 @@ export function loadRunConfig(configPath?: string): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
+async function resolveCsvFiles(
+  dataDir: string,
+  modelId: string,
+  client: V3ApiClient,
+): Promise<Array<{ dataset: string; path: string }>> {
+  const descriptor = await client.getModel(modelId);
+  const requiredDatasets = descriptor.datasets
+    .filter((item) => item.required !== false)
+    .map((item) => item.name);
+  const csvFiles =
+    requiredDatasets.length > 0
+      ? collectCsvFiles(dataDir, requiredDatasets)
+      : discoverCsvFiles(dataDir);
+
+  if (csvFiles.length === 0) {
+    throw new Error(`No CSV files found in ${dataDir}`);
+  }
+  for (const file of csvFiles) {
+    if (!existsSync(file.path)) {
+      throw new Error(`Missing dataset file: ${file.path}`);
+    }
+  }
+  return csvFiles;
+}
+
 export interface V3ValidateResult {
   valid: boolean;
   run_id: string;
+  state: string;
+  phase: string;
+  progress: number;
   errors: V3ValidationError[];
+  validation_report?: Record<string, unknown>;
   build_summary?: { model_built: boolean };
+  metadata?: Record<string, unknown>;
 }
 
 export async function runV3Validate(options: {
@@ -77,25 +130,9 @@ export async function runV3Validate(options: {
   verbose?: boolean;
 }): Promise<V3ValidateResult> {
   const client = new V3ApiClient(options.userConfig, options.identity);
-  const descriptor = await client.getModel(options.modelId);
-  const requiredDatasets = descriptor.datasets
-    .filter((item) => item.required !== false)
-    .map((item) => item.name);
-  const csvFiles =
-    requiredDatasets.length > 0
-      ? collectCsvFiles(options.dataDir, requiredDatasets)
-      : discoverCsvFiles(options.dataDir);
-
-  if (csvFiles.length === 0) {
-    throw new Error(`No CSV files found in ${options.dataDir}`);
-  }
-  for (const file of csvFiles) {
-    if (!existsSync(file.path)) {
-      throw new Error(`Missing dataset file: ${file.path}`);
-    }
-  }
-
+  const csvFiles = await resolveCsvFiles(options.dataDir, options.modelId, client);
   const config = loadRunConfig(options.configPath);
+
   const { run } = await client.createRun(
     {
       mode: 'validate',
@@ -117,8 +154,13 @@ export async function runV3Validate(options: {
   return {
     valid: final.state === 'succeeded',
     run_id: final.run_id,
+    state: final.state,
+    phase: final.phase,
+    progress: final.progress,
     errors: final.errors ?? [],
+    validation_report: final.validation_report as Record<string, unknown> | undefined,
     build_summary: final.build_summary,
+    metadata: final.metadata,
   };
 }
 
@@ -132,23 +174,10 @@ export async function runV3Solve(options: {
   userConfig: UserConfig;
   verbose?: boolean;
 }): Promise<{ run: V3Run; outputFiles: string[] }> {
-  const validation = await runV3Validate(options);
-  if (!validation.valid) {
-    const msg = validation.errors.map((e) => formatV3Error(e)).join('; ');
-    throw new Error(`Validation failed: ${msg}`);
-  }
-
   const client = new V3ApiClient(options.userConfig, options.identity);
-  const descriptor = await client.getModel(options.modelId);
-  const requiredDatasets = descriptor.datasets
-    .filter((item) => item.required !== false)
-    .map((item) => item.name);
-  const csvFiles =
-    requiredDatasets.length > 0
-      ? collectCsvFiles(options.dataDir, requiredDatasets)
-      : discoverCsvFiles(options.dataDir);
-
+  const csvFiles = await resolveCsvFiles(options.dataDir, options.modelId, client);
   const config = loadRunConfig(options.configPath);
+
   const { run } = await client.createRun(
     {
       mode: 'solve',
@@ -172,7 +201,7 @@ export async function runV3Solve(options: {
     throw new Error(msg || 'Solve failed');
   }
 
-  const outDir = resolve(options.projectRoot, options.outDir ?? 'results');
+  const outDir = resolveOutDir(options.projectRoot, options.outDir);
   mkdirSync(outDir, { recursive: true });
   const outputFiles: string[] = [];
   for (const artifact of final.artifacts ?? []) {
@@ -218,6 +247,7 @@ export async function scaffoldV3Project(
     `model_id: ${modelId}`,
     'dataDir: data',
     'defaultConfig: config.json',
+    'outDir: results',
     '',
   ].join('\n');
   writeFileSync(join(targetDir, 'project.yaml'), projectYaml, 'utf8');
@@ -240,12 +270,12 @@ export async function scaffoldV3Project(
       '',
       descriptor.description,
       '',
-      '## Workflow',
+      '## CSV workflow',
       '',
-      '1. Edit CSV files under `data/`',
-      '2. Adjust `config.json` if needed',
-      '3. `smart-planner validate --model-id ... --data-dir data`',
-      '4. `smart-planner solve --model-id ... --data-dir data --out-dir results`',
+      '1. Edit CSV files under `data/` (one file per dataset: `<name>.csv`)',
+      '2. Adjust `config.json` (constraints, objectives, weights, parameters, solver)',
+      '3. `smart-planner validate`',
+      '4. `smart-planner solve`',
       '',
     ].join('\n'),
     'utf8',

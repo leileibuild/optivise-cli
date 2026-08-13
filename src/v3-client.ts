@@ -56,7 +56,7 @@ export interface V3Run {
   summary?: Record<string, unknown>;
   artifacts?: V3Artifact[];
   previews?: Record<string, Array<Record<string, unknown>>>;
-  validation_report?: { valid: boolean };
+  validation_report?: Record<string, unknown>;
   build_summary?: { model_built: boolean };
 }
 

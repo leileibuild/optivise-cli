@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { formatV3Error, loadRunConfig } from '../dist/v3-run.js';
+import { formatV3Error, loadRunConfig, resolveConfigPath, resolveOutDir } from '../dist/v3-run.js';
 import { collectCsvFiles, discoverCsvFiles } from '../dist/v3-client.js';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -42,4 +42,12 @@ test('loadRunConfig parses json object', () => {
   writeFileSync(path, JSON.stringify({ solver: { time_limit_seconds: 30 } }), 'utf8');
   const config = loadRunConfig(path);
   assert.deepEqual(config.solver, { time_limit_seconds: 30 });
+});
+
+test('resolveConfigPath and resolveOutDir use project defaults', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sp-cli-'));
+  writeFileSync(join(dir, 'project.yaml'), 'model_id: m@sha256:1\ndataDir: data\ndefaultConfig: config.json\noutDir: out\n', 'utf8');
+  writeFileSync(join(dir, 'config.json'), '{}', 'utf8');
+  assert.equal(resolveConfigPath(dir), join(dir, 'config.json'));
+  assert.equal(resolveOutDir(dir), join(dir, 'out'));
 });

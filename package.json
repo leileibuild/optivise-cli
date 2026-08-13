@@ -1,6 +1,6 @@
 {
   "name": "@smart-planner/cli",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Smart Planner CLI — npx installable adapter workflow",
   "type": "module",
   "bin": {
@@ -16,12 +16,9 @@
     "test": "npm run build && node --test tests/*.test.js"
   },
   "dependencies": {
-    "@smart-planner/adapter-sdk": "^0.2.0",
-    "commander": "^12.1.0",
-    "exceljs": "^4.4.0"
+    "commander": "^12.1.0"
   },
   "devDependencies": {
-    "@smart-planner/adapter-sdk": "file:../adapter-sdk",
     "@types/node": "^22.10.0",
     "typescript": "^5.7.0"
   },
