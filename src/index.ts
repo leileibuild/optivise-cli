@@ -19,17 +19,95 @@ import {
 import { scaffoldTemplateProject } from './init-template.js';
 import {
   resolveConfigPath,
-  resolveExcelPath,
   resolveTemplateId,
   runTemplateSolve,
   runValidate,
 } from './template-solve.js';
+import { V3ApiClient } from './v3-client.js';
+import {
+  formatV3Error,
+  resolveDataDir,
+  resolveModelId,
+  runV3Solve,
+  runV3Validate,
+  scaffoldV3Project,
+} from './v3-run.js';
 
 const program = new Command();
 
 program.name('smart-planner').description('Smart Planner CLI').version('0.2.0');
 
-const templatesCmd = program.command('templates').description('Built-in problem templates');
+const modelsCmd = program.command('models').description('Problem-agnostic v3 models (server)');
+
+modelsCmd
+  .command('list')
+  .description('List immutable model revisions from GET /v3/models')
+  .option('--format <fmt>', 'Output format: json or text', 'text')
+  .action(async (opts: { format: string }) => {
+    const config = loadConfig();
+    if (!config) {
+      console.error('Run: smart-planner login --backend-url <url>');
+      process.exit(3);
+    }
+    const identity = loadIdentity() ?? undefined;
+    const client = new V3ApiClient(config, identity);
+    const payload = await client.listModels();
+    if (opts.format === 'json') {
+      console.log(JSON.stringify(payload, null, 2));
+      return;
+    }
+    for (const model of payload.models) {
+      console.log(`${model.model_id}\t${model.name}`);
+    }
+  });
+
+modelsCmd
+  .command('get')
+  .requiredOption('--model-id <id>', 'Immutable model_id')
+  .option('--format <fmt>', 'json or text', 'json')
+  .description('Get model descriptor from GET /v3/models/{model_id}')
+  .action(async (opts: { modelId: string; format: string }) => {
+    const config = loadConfig();
+    if (!config) {
+      console.error('Run: smart-planner login --backend-url <url>');
+      process.exit(3);
+    }
+    const identity = loadIdentity() ?? undefined;
+    const client = new V3ApiClient(config, identity);
+    const descriptor = await client.getModel(opts.modelId);
+    if (opts.format === 'json') {
+      console.log(JSON.stringify(descriptor, null, 2));
+      return;
+    }
+    console.log(`${descriptor.name} (${descriptor.model_id})`);
+    console.log(descriptor.description);
+    for (const dataset of descriptor.datasets) {
+      console.log(`dataset=${dataset.name}${dataset.required === false ? ' (optional)' : ''}`);
+    }
+  });
+
+modelsCmd
+  .command('template')
+  .requiredOption('--model-id <id>', 'Immutable model_id')
+  .requiredOption('--dataset <name>', 'Dataset name')
+  .option('--out <path>', 'Output CSV path')
+  .description('Download one CSV template')
+  .action(async (opts: { modelId: string; dataset: string; out?: string }) => {
+    const config = loadConfig();
+    if (!config) {
+      console.error('Run: smart-planner login --backend-url <url>');
+      process.exit(3);
+    }
+    const identity = loadIdentity() ?? undefined;
+    const client = new V3ApiClient(config, identity);
+    const csv = await client.downloadTemplate(opts.modelId, opts.dataset);
+    const outPath = opts.out ?? `${opts.dataset}.csv`;
+    const { writeFileSync } = await import('node:fs');
+    writeFileSync(outPath, csv, 'utf8');
+    console.log(outPath);
+  });
+
+const templatesCmd = program.command('templates').description('Built-in problem templates (local)');
 
 templatesCmd
   .command('list')
@@ -81,17 +159,67 @@ program
 
 program
   .command('validate')
-  .requiredOption('--template <id>', 'Template id')
-  .requiredOption('--excel <path>', 'Excel input path')
-  .option('--config <path>', 'supplemental.yaml path')
+  .option('--model-id <id>', 'Immutable v3 model_id (remote CSV validation)')
+  .option('--data-dir <path>', 'Directory of <dataset>.csv files for v3')
+  .option('--template <id>', 'Local template id (Excel workflow)')
+  .option('--excel <path>', 'Excel input path (local template workflow)')
+  .option('--config <path>', 'config.json for v3 or supplemental.yaml for templates')
   .option('--format <fmt>', 'json or text', 'text')
-  .action(async (opts: { template: string; excel: string; config?: string; format: string }) => {
+  .option('--verbose', 'Verbose logging')
+  .description('Validate inputs locally (template) or remotely via POST /v3/runs mode=validate')
+  .action(async (opts: {
+    modelId?: string;
+    dataDir?: string;
+    template?: string;
+    excel?: string;
+    config?: string;
+    format: string;
+    verbose?: boolean;
+  }) => {
     const projectRoot = process.cwd();
+
+    if (opts.modelId || opts.dataDir) {
+      const config = loadConfig();
+      if (!config) {
+        console.error('v3 validate requires: smart-planner login --backend-url <url>');
+        process.exit(3);
+      }
+      const modelId = resolveModelId(projectRoot, opts.modelId);
+      const dataDir = resolveDataDir(projectRoot, opts.dataDir);
+      const result = await runV3Validate({
+        projectRoot,
+        modelId,
+        dataDir,
+        configPath: opts.config ? resolve(projectRoot, opts.config) : undefined,
+        identity: loadIdentity() ?? undefined,
+        userConfig: config,
+        verbose: opts.verbose,
+      });
+      if (opts.format === 'json') {
+        console.log(JSON.stringify(result, null, 2));
+      } else if (result.valid) {
+        console.log('Validation passed');
+        console.log(`run_id=${result.run_id}`);
+      } else {
+        for (const err of result.errors) {
+          console.error(formatV3Error(err));
+        }
+      }
+      process.exit(result.valid ? 0 : 1);
+    }
+
+    if (!opts.template || !opts.excel) {
+      console.error('Use --model-id --data-dir for v3, or --template --excel for local templates');
+      process.exit(2);
+    }
+
     const result = await runValidate({
       projectRoot,
       templateId: opts.template,
       excelPath: resolve(projectRoot, opts.excel),
-      configPath: opts.config ? resolve(projectRoot, opts.config) : resolveConfigPath(projectRoot, opts.template, opts.config),
+      configPath: opts.config
+        ? resolve(projectRoot, opts.config)
+        : resolveConfigPath(projectRoot, opts.template, opts.config),
     });
     if (opts.format === 'json') {
       console.log(JSON.stringify(result, null, 2));
@@ -107,11 +235,28 @@ program
 
 program
   .command('init')
-  .requiredOption('--template <id>', 'Template id')
+  .option('--model-id <id>', 'Immutable v3 model_id (download CSV templates from server)')
+  .option('--template <id>', 'Built-in local template id')
   .argument('[dir]', 'Project directory', '.')
-  .description('Scaffold project.yaml and sample data for a template')
-  .action(async (dir: string, opts: { template: string }) => {
+  .description('Scaffold project from v3 model or built-in template')
+  .action(async (dir: string, opts: { modelId?: string; template?: string }) => {
     const target = resolve(process.cwd(), dir);
+    if (opts.modelId) {
+      const config = loadConfig();
+      if (!config) {
+        console.error('v3 init requires: smart-planner login --backend-url <url>');
+        process.exit(3);
+      }
+      await scaffoldV3Project(config, opts.modelId, target, loadIdentity() ?? undefined);
+      console.log(`Created v3 project at ${target}`);
+      console.log(`model_id=${opts.modelId}`);
+      console.log('Next: edit data/*.csv, then validate / solve');
+      return;
+    }
+    if (!opts.template) {
+      console.error('Provide --model-id or --template');
+      process.exit(2);
+    }
     await scaffoldTemplateProject(opts.template, target);
     console.log(`Created template project at ${target}`);
     console.log(`template_id=${opts.template}`);
@@ -157,20 +302,61 @@ program
 
 program
   .command('solve')
+  .option('--model-id <id>', 'Immutable v3 model_id (remote CSV solve)')
+  .option('--data-dir <path>', 'Directory of <dataset>.csv files for v3')
+  .option('--out-dir <path>', 'Directory for downloaded result CSV artifacts')
   .option('--template <id>', 'Template id (or project.yaml template_id)')
-  .requiredOption('--excel <path>', 'Excel input path')
-  .option('--config <path>', 'supplemental.yaml path')
+  .option('--excel <path>', 'Excel input path (local template workflow)')
+  .option('--config <path>', 'config.json for v3 or supplemental.yaml for templates')
   .option('--local', 'Solve cp_sat templates locally with WASM')
   .option('--verbose', 'Verbose logging')
-  .description('Validate, solve, and write results to Excel')
+  .description('Validate and solve via v3 CSV runs or legacy template workflow')
   .action(async (opts: {
+    modelId?: string;
+    dataDir?: string;
+    outDir?: string;
     template?: string;
-    excel: string;
+    excel?: string;
     config?: string;
     local?: boolean;
     verbose?: boolean;
   }) => {
     const projectRoot = process.cwd();
+
+    if (opts.modelId || opts.dataDir) {
+      const config = loadConfig();
+      if (!config) {
+        console.error('v3 solve requires: smart-planner login --backend-url <url>');
+        process.exit(3);
+      }
+      const modelId = resolveModelId(projectRoot, opts.modelId);
+      const dataDir = resolveDataDir(projectRoot, opts.dataDir);
+      const { run, outputFiles } = await runV3Solve({
+        projectRoot,
+        modelId,
+        dataDir,
+        configPath: opts.config ? resolve(projectRoot, opts.config) : undefined,
+        outDir: opts.outDir,
+        identity: loadIdentity() ?? undefined,
+        userConfig: config,
+        verbose: opts.verbose,
+      });
+      console.log('Solve finished');
+      console.log(`model_id=${modelId} state=${run.state}`);
+      if (run.summary) {
+        console.log(JSON.stringify(run.summary));
+      }
+      for (const file of outputFiles) {
+        console.log(`artifact=${file}`);
+      }
+      return;
+    }
+
+    if (!opts.excel) {
+      console.error('Use --model-id --data-dir for v3, or --template --excel for local templates');
+      process.exit(2);
+    }
+
     const templateId = resolveTemplateId(projectRoot, opts.template);
     const identity = loadIdentity();
     const config = loadConfig();
