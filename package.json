@@ -1,0 +1,40 @@
+{
+  "name": "@smart-planner/cli",
+  "version": "0.2.0",
+  "description": "Smart Planner CLI — npx installable adapter workflow",
+  "type": "module",
+  "bin": {
+    "smart-planner": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "templates"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build",
+    "test": "npm run build && node --test tests/*.test.js"
+  },
+  "dependencies": {
+    "@smart-planner/adapter-sdk": "^0.2.0",
+    "commander": "^12.1.0",
+    "exceljs": "^4.4.0"
+  },
+  "devDependencies": {
+    "@smart-planner/adapter-sdk": "file:../adapter-sdk",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/leileibuild/smart-planner.git",
+    "directory": "packages/cli"
+  },
+  "license": "ISC"
+}

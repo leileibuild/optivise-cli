@@ -1,0 +1,3 @@
+adapterId: standalone_demo_ts
+modelVersion: "1"
+defaultExcel: data/sample.xlsx
