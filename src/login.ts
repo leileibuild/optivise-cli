@@ -35,7 +35,12 @@ async function openBrowser(url: string): Promise<void> {
   const platform = process.platform;
   try {
     if (platform === 'win32') {
-      await execFileAsync('cmd', ['/c', 'start', '', url], { windowsHide: true });
+      // cmd.exe treats '&' as a command separator and drops ?state=... from auth URLs.
+      await execFileAsync(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-Command', `Start-Process '${url.replace(/'/g, "''")}'`],
+        { windowsHide: true },
+      );
       return;
     }
     if (platform === 'darwin') {
@@ -48,7 +53,16 @@ async function openBrowser(url: string): Promise<void> {
   }
 }
 
-export async function loginWithBrowser(config: UserConfig): Promise<Session> {
+function buildAuthUrl(backendUrl: string, userCode: string, state: string): string {
+  const base = `${backendUrl.replace(/\/$/, '')}/auth?user_code=${encodeURIComponent(userCode)}`;
+  // Put state in the hash so Windows shell openers never strip it at '&'.
+  return `${base}#state=${encodeURIComponent(state)}`;
+}
+
+export async function loginWithBrowser(
+  config: UserConfig,
+  options?: { localDev?: boolean },
+): Promise<Session> {
   const codeVerifier = randomUrlSafe(48);
   const codeChallenge = pkceChallenge(codeVerifier);
   const state = randomUrlSafe(24);
@@ -64,9 +78,22 @@ export async function loginWithBrowser(config: UserConfig): Promise<Session> {
     throw new Error(`Device auth start failed (${startResp.status}): ${await startResp.text()}`);
   }
   const started = (await startResp.json()) as DeviceStartResponse;
-  const authUrl = `${config.backendUrl}/auth?user_code=${encodeURIComponent(started.user_code)}&state=${encodeURIComponent(state)}`;
+  const authUrl = buildAuthUrl(config.backendUrl, started.user_code, state);
+  console.error(`Device code: ${started.user_code}`);
   console.error(`Opening browser for sign-in: ${authUrl}`);
-  await openBrowser(authUrl);
+
+  if (options?.localDev) {
+    const approveResp = await fetch(`${config.backendUrl}/v3/auth/device/local-authorize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_code: started.user_code, state }),
+    });
+    if (!approveResp.ok) {
+      throw new Error(`Local authorize failed (${approveResp.status}): ${await approveResp.text()}`);
+    }
+  } else {
+    await openBrowser(authUrl);
+  }
 
   const pollPath = '/v3/auth/device/token';
   const deadline = Date.now() + (started.expires_in ?? 600) * 1000;

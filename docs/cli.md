@@ -78,6 +78,7 @@ Matches the v3 configuration envelope (model-specific JSON Schema is authoritati
 
 - **Anonymous by default:** `validate`, `solve`, `models`, etc. work without login when the server allows anonymous v3 access (default). Set backend URL once via `login --backend-url` or `SMART_PLANNER_BACKEND_URL`.
 - **`login`:** opens `/auth` in your browser (Google, WeChat, or local dev sign-in), polls device authorization, then saves:
+  - For local dev without browser: `login --backend-url <url> --local-dev` (requires server `SMART_PLANNER_LOCAL_AUTH=1`)
   - `~/.smartplanner/session.json` — Bearer token for `/v3`
   - `~/.smartplanner/identity.json` — HMAC credentials for legacy `/v1` CLI routes
 - **`whoami`:** prints `principal_id` when logged in, otherwise `anonymous`.

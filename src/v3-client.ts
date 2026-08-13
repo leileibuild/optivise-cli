@@ -125,10 +125,7 @@ export class V3ApiClient {
     idempotencyKey: string = randomUUID(),
   ): Promise<{ run: V3Run; location: string }> {
     const form = new FormData();
-    form.append(
-      'request',
-      new Blob([JSON.stringify(request)], { type: 'application/json' }),
-    );
+    form.append('request', JSON.stringify(request));
     for (const file of csvFiles) {
       const content = readFileSync(file.path);
       const filename = `${file.dataset}.csv`;

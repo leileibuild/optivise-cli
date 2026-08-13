@@ -1,0 +1,5 @@
+item_id,required_units,priority
+PROJ-A,50,100
+PROJ-B,40,80
+PROJ-C,30,60
+PROJ-D,25,40

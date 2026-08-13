@@ -1,0 +1,19 @@
+{
+  "constraints": {
+    "capacity_limit": true
+  },
+  "objectives": {
+    "maximize_priority": true
+  },
+  "weights": {
+    "maximize_priority": 1.0
+  },
+  "parameters": {
+    "capacity_units": 80
+  },
+  "solver": {
+    "time_limit_seconds": 30,
+    "workers": 4
+  },
+  "extras": {}
+}

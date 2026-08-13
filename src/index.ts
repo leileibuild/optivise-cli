@@ -185,7 +185,7 @@ program
         console.error(formatV3Error(err));
       }
     }
-    process.exit(result.valid ? 0 : 1);
+    process.exitCode = result.valid ? 0 : 1;
   });
 
 program
@@ -236,11 +236,12 @@ program
 program
   .command('login')
   .requiredOption('--backend-url <url>', 'Smart Planner backend URL')
+  .option('--local-dev', 'Skip browser and authorize local test account (dev only)')
   .description('Open browser sign-in (Google/WeChat) and save session + HMAC credentials')
-  .action(async (opts: { backendUrl: string }) => {
+  .action(async (opts: { backendUrl: string; localDev?: boolean }) => {
     const config = resolveBackendUrl(opts.backendUrl);
     saveConfig(config);
-    const session = await loginWithBrowser(config);
+    const session = await loginWithBrowser(config, { localDev: opts.localDev });
     console.log('Logged in');
     console.log(`principal_id=${session.principalId}`);
     if (session.email) {
