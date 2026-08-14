@@ -7,8 +7,7 @@
     "smart-planner": "./dist/index.js"
   },
   "files": [
-    "dist",
-    "templates"
+    "dist"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -31,7 +30,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/leileibuild/smart-planner.git",
-    "directory": "packages/cli"
+    "directory": "cli"
   },
   "license": "ISC"
 }

@@ -4,6 +4,8 @@ Agent-driven **CSV workflow** aligned with the problem-agnostic `/v3` API: disco
 
 See [Problem-agnostic v3 API](problem_agnostic_api.md) and [OpenAPI v3](../openapi/v3.yaml).
 
+Package source: [`cli/`](../cli/) (standalone npm package, separate from the Python backend).
+
 ## Quick start
 
 ```bash
