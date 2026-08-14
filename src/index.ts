@@ -15,7 +15,12 @@ import {
 import { loginWithBrowser, sessionSummary } from './login.js';
 import { V3ApiClient } from './v3-client.js';
 import {
+  buildAsyncSubmitPayload,
+  buildRunStatusPayload,
+  downloadV3RunArtifacts,
   formatV3Error,
+  fetchV3RunStatus,
+  isTerminalRunState,
   resolveConfigPath,
   resolveDataDir,
   resolveModelId,
@@ -23,6 +28,7 @@ import {
   runV3Solve,
   runV3Validate,
   scaffoldV3Project,
+  waitV3Run,
 } from './v3-run.js';
 
 const program = new Command();
@@ -30,7 +36,7 @@ const program = new Command();
 program
   .name('smart-planner')
   .description('Smart Planner CLI — CSV datasets, immutable models, /v3 runs')
-  .version('0.3.0');
+  .version('0.3.1');
 
 function getClientContext(explicitBackendUrl?: string): {
   config: UserConfig;
@@ -156,6 +162,8 @@ program
   .option('--config <path>', 'config.json path (default: project.yaml defaultConfig)')
   .option('--format <fmt>', 'json or text', 'text')
   .option('--verbose', 'Log run_id and phase progress to stderr')
+  .option('--async', 'Submit run and return immediately with run_id (poll with runs status/wait)')
+  .option('--wait-timeout <sec>', 'Max seconds to wait when not using --async', parseWaitTimeout)
   .description('Validate CSV datasets (POST /v3/runs mode=validate)')
   .action(async (opts: {
     modelId?: string;
@@ -163,6 +171,8 @@ program
     config?: string;
     format: string;
     verbose?: boolean;
+    async?: boolean;
+    waitTimeout?: number;
   }) => {
     const { config, session } = getClientContext();
     const projectRoot = process.cwd();
@@ -174,7 +184,19 @@ program
       session,
       userConfig: config,
       verbose: opts.verbose,
+      async: opts.async,
+      waitTimeoutSec: opts.waitTimeout,
     });
+    if (opts.async && result.run) {
+      const payload = buildAsyncSubmitPayload(result.run, 'validate');
+      if (opts.format === 'json') {
+        console.log(JSON.stringify(payload, null, 2));
+      } else {
+        console.log(`Submitted validate run_id=${result.run_id} state=${result.state}`);
+        console.log(`Poll: smart-planner runs status --run-id ${result.run_id}`);
+      }
+      return;
+    }
     if (opts.format === 'json') {
       console.log(JSON.stringify(result, null, 2));
     } else if (result.valid) {
@@ -196,6 +218,8 @@ program
   .option('--out-dir <path>', 'Directory for result CSV artifacts (default: results/)')
   .option('--format <fmt>', 'json or text', 'text')
   .option('--verbose', 'Log run_id and phase progress to stderr')
+  .option('--async', 'Submit solve and return immediately with run_id (poll with runs status/wait/download)')
+  .option('--wait-timeout <sec>', 'Max seconds to wait when not using --async', parseWaitTimeout)
   .description('Solve and download result CSVs (POST /v3/runs mode=solve)')
   .action(async (opts: {
     modelId?: string;
@@ -204,10 +228,12 @@ program
     outDir?: string;
     format: string;
     verbose?: boolean;
+    async?: boolean;
+    waitTimeout?: number;
   }) => {
     const { config, session } = getClientContext();
     const projectRoot = process.cwd();
-    const { run, outputFiles } = await runV3Solve({
+    const { run, outputFiles, asyncSubmitted } = await runV3Solve({
       projectRoot,
       modelId: resolveModelId(projectRoot, opts.modelId),
       dataDir: resolveDataDir(projectRoot, opts.dataDir),
@@ -216,7 +242,20 @@ program
       session,
       userConfig: config,
       verbose: opts.verbose,
+      async: opts.async,
+      waitTimeoutSec: opts.waitTimeout,
     });
+
+    if (asyncSubmitted) {
+      const payload = buildAsyncSubmitPayload(run, 'solve');
+      if (opts.format === 'json') {
+        console.log(JSON.stringify(payload, null, 2));
+      } else {
+        console.log(`Submitted solve run_id=${run.run_id} state=${run.state}`);
+        console.log(`Poll: smart-planner runs status --run-id ${run.run_id}`);
+      }
+      return;
+    }
 
     if (opts.format === 'json') {
       console.log(JSON.stringify({ run, output_files: outputFiles }, null, 2));
@@ -232,6 +271,112 @@ program
       console.log(`artifact=${file}`);
     }
   });
+
+const runsCmd = program.command('runs').description('Poll and download asynchronous /v3/runs');
+
+runsCmd
+  .command('status')
+  .requiredOption('--run-id <id>', 'Run id returned by validate/solve --async')
+  .option('--format <fmt>', 'json or text', 'json')
+  .description('Fetch current run state once (GET /v3/runs/{run_id})')
+  .action(async (opts: { runId: string; format: string }) => {
+    const { config, session } = getClientContext();
+    const { run, retryAfterMs } = await fetchV3RunStatus({
+      runId: opts.runId,
+      session,
+      userConfig: config,
+    });
+    const payload = buildRunStatusPayload(run, {
+      timed_out: false,
+      retry_after_seconds: retryAfterMs == null ? null : Math.ceil(retryAfterMs / 1000),
+      next_wait_command: `smart-planner runs wait --run-id ${run.run_id} --timeout 60 --format json`,
+      next_download_command:
+        run.mode === 'solve' && run.state === 'succeeded'
+          ? `smart-planner runs download --run-id ${run.run_id} --out-dir ./out --format json`
+          : undefined,
+    });
+    if (opts.format === 'json') {
+      console.log(JSON.stringify(payload, null, 2));
+      return;
+    }
+    console.log(`${run.run_id}\t${run.state}\t${run.phase}\t${run.progress}`);
+    if (!isTerminalRunState(run.state)) {
+      process.exitCode = 2;
+    } else if (run.state === 'failed') {
+      process.exitCode = 1;
+    }
+  });
+
+runsCmd
+  .command('wait')
+  .requiredOption('--run-id <id>', 'Run id to poll until terminal or timeout')
+  .option('--timeout <sec>', 'Max seconds to wait (0 = single status check)', parseWaitTimeout, 60)
+  .option('--format <fmt>', 'json or text', 'json')
+  .option('--verbose', 'Log phase progress to stderr')
+  .description('Poll run until succeeded/failed or timeout')
+  .action(async (opts: { runId: string; timeout: number; format: string; verbose?: boolean }) => {
+    const { config, session } = getClientContext();
+    const { run, timedOut } = await waitV3Run({
+      runId: opts.runId,
+      session,
+      userConfig: config,
+      timeoutSec: opts.timeout,
+      verbose: opts.verbose,
+    });
+    const payload = buildRunStatusPayload(run, {
+      timed_out: timedOut,
+      next_status_command: `smart-planner runs status --run-id ${run.run_id} --format json`,
+      next_download_command:
+        run.mode === 'solve' && run.state === 'succeeded'
+          ? `smart-planner runs download --run-id ${run.run_id} --out-dir ./out --format json`
+          : undefined,
+    });
+    if (opts.format === 'json') {
+      console.log(JSON.stringify(payload, null, 2));
+    } else {
+      console.log(`${run.run_id}\t${run.state}\t${run.phase}\t${run.progress}`);
+      if (timedOut) {
+        console.log('Still in progress — check again later.');
+      }
+    }
+    if (timedOut) {
+      process.exitCode = 2;
+    } else if (run.state === 'failed') {
+      process.exitCode = 1;
+    }
+  });
+
+runsCmd
+  .command('download')
+  .requiredOption('--run-id <id>', 'Succeeded solve run id')
+  .option('--out-dir <path>', 'Directory for result CSV artifacts', './out')
+  .option('--format <fmt>', 'json or text', 'json')
+  .description('Download artifacts for a succeeded solve run')
+  .action(async (opts: { runId: string; outDir: string; format: string }) => {
+    const { config, session } = getClientContext();
+    const outDir = resolve(process.cwd(), opts.outDir);
+    const { run, outputFiles } = await downloadV3RunArtifacts({
+      runId: opts.runId,
+      outDir,
+      session,
+      userConfig: config,
+    });
+    if (opts.format === 'json') {
+      console.log(JSON.stringify({ run, output_files: outputFiles }, null, 2));
+      return;
+    }
+    for (const file of outputFiles) {
+      console.log(`artifact=${file}`);
+    }
+  });
+
+function parseWaitTimeout(value: string): number {
+  const parsed = Number.parseInt(value, 10);
+  if (Number.isNaN(parsed) || parsed < 0) {
+    throw new Error(`Invalid timeout seconds: ${value}`);
+  }
+  return parsed;
+}
 
 program
   .command('login')

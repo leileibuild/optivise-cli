@@ -163,21 +163,40 @@ export class V3ApiClient {
 
   async pollRun(
     runId: string,
-    onProgress?: (run: V3Run) => void,
-    maxAttempts = 120,
-  ): Promise<V3Run> {
+    options: {
+      onProgress?: (run: V3Run) => void;
+      maxAttempts?: number;
+      maxWaitMs?: number;
+    } = {},
+  ): Promise<{ run: V3Run; timedOut: boolean }> {
+    const maxAttempts = options.maxAttempts ?? 120;
+    const maxWaitMs = options.maxWaitMs;
+    const startedAt = Date.now();
+
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       const { run, retryAfterMs } = await this.getRun(runId);
-      if (onProgress) {
-        onProgress(run);
+      if (options.onProgress) {
+        options.onProgress(run);
       }
       if (run.state === 'succeeded' || run.state === 'failed') {
-        return run;
+        return { run, timedOut: false };
+      }
+      if (maxWaitMs != null && Date.now() - startedAt >= maxWaitMs) {
+        return { run, timedOut: true };
       }
       const delay = retryAfterMs ?? 2000;
-      await new Promise((resolve) => setTimeout(resolve, delay));
+      if (maxWaitMs != null) {
+        const remaining = maxWaitMs - (Date.now() - startedAt);
+        if (remaining <= 0) {
+          return { run, timedOut: true };
+        }
+        await new Promise((resolve) => setTimeout(resolve, Math.min(delay, remaining)));
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
     }
-    throw new Error('Run timed out');
+    const { run } = await this.getRun(runId);
+    return { run, timedOut: run.state !== 'succeeded' && run.state !== 'failed' };
   }
 
   async downloadArtifact(runId: string, artifactId: string): Promise<string> {

@@ -1,10 +1,10 @@
 {
   "name": "@smart-planner/cli",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Smart Planner CLI — npx installable adapter workflow",
   "type": "module",
   "bin": {
-    "smart-planner": "./dist/index.js"
+    "smart-planner": "dist/index.js"
   },
   "files": [
     "dist"

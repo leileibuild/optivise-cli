@@ -118,6 +118,138 @@ export interface V3ValidateResult {
   validation_report?: Record<string, unknown>;
   build_summary?: { model_built: boolean };
   metadata?: Record<string, unknown>;
+  run?: V3Run;
+  asyncSubmitted?: boolean;
+}
+
+export function isTerminalRunState(state: string): boolean {
+  return state === 'succeeded' || state === 'failed';
+}
+
+export function buildRunStatusPayload(run: V3Run, extras: Record<string, unknown> = {}): Record<string, unknown> {
+  const terminal = isTerminalRunState(run.state);
+  return {
+    run_id: run.run_id,
+    mode: run.mode,
+    model_id: run.model_id,
+    state: run.state,
+    phase: run.phase,
+    progress: run.progress,
+    terminal,
+    errors: run.errors ?? [],
+    summary: run.summary,
+    artifacts: run.artifacts,
+    validation_report: run.validation_report,
+    build_summary: run.build_summary,
+    metadata: run.metadata,
+    ...extras,
+  };
+}
+
+export function buildAsyncSubmitPayload(run: V3Run, mode: 'validate' | 'solve'): Record<string, unknown> {
+  const poll = `smart-planner runs status --run-id ${run.run_id} --format json`;
+  const wait = `smart-planner runs wait --run-id ${run.run_id} --timeout 60 --format json`;
+  const download =
+    mode === 'solve'
+      ? `smart-planner runs download --run-id ${run.run_id} --out-dir ./out --format json`
+      : undefined;
+  return {
+    async: true,
+    submitted: true,
+    run_id: run.run_id,
+    mode,
+    model_id: run.model_id,
+    state: run.state,
+    phase: run.phase,
+    progress: run.progress,
+    terminal: isTerminalRunState(run.state),
+    message: 'Run submitted asynchronously. Poll status and download results in separate steps.',
+    poll_command: poll,
+    wait_command: wait,
+    download_command: download,
+  };
+}
+
+export async function submitV3Run(options: {
+  projectRoot: string;
+  modelId: string;
+  dataDir: string;
+  configPath?: string;
+  mode: 'validate' | 'solve';
+  session?: Session | null;
+  userConfig: UserConfig;
+}): Promise<V3Run> {
+  const client = new V3ApiClient(options.userConfig, options.session);
+  const csvFiles = await resolveCsvFiles(options.dataDir, options.modelId, client);
+  const config = loadRunConfig(options.configPath);
+  const { run } = await client.createRun(
+    {
+      mode: options.mode,
+      model_id: options.modelId,
+      config,
+      metadata: { cli: 'smart-planner', command: options.mode, async: true },
+    },
+    csvFiles,
+  );
+  return run;
+}
+
+export async function fetchV3RunStatus(options: {
+  runId: string;
+  session?: Session | null;
+  userConfig: UserConfig;
+}): Promise<{ run: V3Run; retryAfterMs: number | null }> {
+  const client = new V3ApiClient(options.userConfig, options.session);
+  return client.getRun(options.runId);
+}
+
+export async function waitV3Run(options: {
+  runId: string;
+  session?: Session | null;
+  userConfig: UserConfig;
+  timeoutSec?: number;
+  verbose?: boolean;
+}): Promise<{ run: V3Run; timedOut: boolean }> {
+  const client = new V3ApiClient(options.userConfig, options.session);
+  const maxWaitMs =
+    options.timeoutSec == null ? undefined : Math.max(0, Math.floor(options.timeoutSec * 1000));
+  return client.pollRun(options.runId, {
+    maxWaitMs,
+    maxAttempts: maxWaitMs == null ? 1 : 10_000,
+    onProgress: options.verbose
+      ? (snapshot) => {
+          if (snapshot.phase) {
+            console.error(`phase=${snapshot.phase} progress=${snapshot.progress}`);
+          }
+        }
+      : undefined,
+  });
+}
+
+export async function downloadV3RunArtifacts(options: {
+  runId: string;
+  outDir: string;
+  session?: Session | null;
+  userConfig: UserConfig;
+}): Promise<{ run: V3Run; outputFiles: string[] }> {
+  const client = new V3ApiClient(options.userConfig, options.session);
+  const { run } = await client.getRun(options.runId);
+  if (run.state === 'failed') {
+    const msg = (run.errors ?? []).map((e) => formatV3Error(e)).join('; ');
+    throw new Error(msg || 'Run failed');
+  }
+  if (run.state !== 'succeeded') {
+    throw new Error(`Run is not ready for download (state=${run.state}). Poll with runs status/wait.`);
+  }
+  mkdirSync(options.outDir, { recursive: true });
+  const outputFiles: string[] = [];
+  for (const artifact of run.artifacts ?? []) {
+    const csv = await client.downloadArtifact(run.run_id, artifact.artifact_id);
+    const outPath = join(options.outDir, artifact.filename);
+    writeFileSync(outPath, csv, 'utf8');
+    outputFiles.push(outPath);
+  }
+  return { run, outputFiles };
 }
 
 export async function runV3Validate(options: {
@@ -128,7 +260,31 @@ export async function runV3Validate(options: {
   session?: Session | null;
   userConfig: UserConfig;
   verbose?: boolean;
+  async?: boolean;
+  waitTimeoutSec?: number;
 }): Promise<V3ValidateResult> {
+  if (options.async) {
+    const run = await submitV3Run({
+      projectRoot: options.projectRoot,
+      modelId: options.modelId,
+      dataDir: options.dataDir,
+      configPath: options.configPath,
+      mode: 'validate',
+      session: options.session,
+      userConfig: options.userConfig,
+    });
+    return {
+      valid: false,
+      run_id: run.run_id,
+      state: run.state,
+      phase: run.phase,
+      progress: run.progress,
+      errors: [],
+      run,
+      asyncSubmitted: true,
+    };
+  }
+
   const client = new V3ApiClient(options.userConfig, options.session);
   const csvFiles = await resolveCsvFiles(options.dataDir, options.modelId, client);
   const config = loadRunConfig(options.configPath);
@@ -145,11 +301,20 @@ export async function runV3Validate(options: {
   if (options.verbose) {
     console.error(`run_id=${run.run_id}`);
   }
-  const final = await client.pollRun(run.run_id, (snapshot) => {
-    if (options.verbose && snapshot.phase) {
-      console.error(`phase=${snapshot.phase} progress=${snapshot.progress}`);
-    }
+  const { run: final, timedOut } = await client.pollRun(run.run_id, {
+    maxWaitMs:
+      options.waitTimeoutSec == null ? undefined : Math.max(0, Math.floor(options.waitTimeoutSec * 1000)),
+    onProgress: (snapshot) => {
+      if (options.verbose && snapshot.phase) {
+        console.error(`phase=${snapshot.phase} progress=${snapshot.progress}`);
+      }
+    },
   });
+  if (timedOut) {
+    throw new Error(
+      `Validate still ${final.state} (phase=${final.phase}). Re-check with: smart-planner runs status --run-id ${final.run_id} --format json`,
+    );
+  }
 
   return {
     valid: final.state === 'succeeded',
@@ -173,7 +338,22 @@ export async function runV3Solve(options: {
   session?: Session | null;
   userConfig: UserConfig;
   verbose?: boolean;
-}): Promise<{ run: V3Run; outputFiles: string[] }> {
+  async?: boolean;
+  waitTimeoutSec?: number;
+}): Promise<{ run: V3Run; outputFiles: string[]; asyncSubmitted?: boolean }> {
+  if (options.async) {
+    const run = await submitV3Run({
+      projectRoot: options.projectRoot,
+      modelId: options.modelId,
+      dataDir: options.dataDir,
+      configPath: options.configPath,
+      mode: 'solve',
+      session: options.session,
+      userConfig: options.userConfig,
+    });
+    return { run, outputFiles: [], asyncSubmitted: true };
+  }
+
   const client = new V3ApiClient(options.userConfig, options.session);
   const csvFiles = await resolveCsvFiles(options.dataDir, options.modelId, client);
   const config = loadRunConfig(options.configPath);
@@ -190,11 +370,21 @@ export async function runV3Solve(options: {
   if (options.verbose) {
     console.error(`run_id=${run.run_id}`);
   }
-  const final = await client.pollRun(run.run_id, (snapshot) => {
-    if (options.verbose && snapshot.phase) {
-      console.error(`phase=${snapshot.phase} progress=${snapshot.progress}`);
-    }
+  const { run: final, timedOut } = await client.pollRun(run.run_id, {
+    maxWaitMs:
+      options.waitTimeoutSec == null ? undefined : Math.max(0, Math.floor(options.waitTimeoutSec * 1000)),
+    onProgress: (snapshot) => {
+      if (options.verbose && snapshot.phase) {
+        console.error(`phase=${snapshot.phase} progress=${snapshot.progress}`);
+      }
+    },
   });
+
+  if (timedOut) {
+    throw new Error(
+      `Solve still ${final.state} (phase=${final.phase}). Re-check with: smart-planner runs wait --run-id ${final.run_id} --timeout 60 --format json`,
+    );
+  }
 
   if (final.state === 'failed') {
     const msg = (final.errors ?? []).map((e) => formatV3Error(e)).join('; ');

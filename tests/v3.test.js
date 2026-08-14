@@ -1,7 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { formatV3Error, loadRunConfig, resolveConfigPath, resolveOutDir } from '../dist/v3-run.js';
+import {
+  buildAsyncSubmitPayload,
+  buildRunStatusPayload,
+  formatV3Error,
+  isTerminalRunState,
+  loadRunConfig,
+  resolveConfigPath,
+  resolveOutDir,
+} from '../dist/v3-run.js';
 import { collectCsvFiles, discoverCsvFiles } from '../dist/v3-client.js';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -50,4 +58,40 @@ test('resolveConfigPath and resolveOutDir use project defaults', () => {
   writeFileSync(join(dir, 'config.json'), '{}', 'utf8');
   assert.equal(resolveConfigPath(dir), join(dir, 'config.json'));
   assert.equal(resolveOutDir(dir), join(dir, 'out'));
+});
+
+test('isTerminalRunState detects finished runs', () => {
+  assert.equal(isTerminalRunState('succeeded'), true);
+  assert.equal(isTerminalRunState('failed'), true);
+  assert.equal(isTerminalRunState('running'), false);
+});
+
+test('buildAsyncSubmitPayload includes poll and wait commands', () => {
+  const payload = buildAsyncSubmitPayload(
+    {
+      run_id: 'run_123',
+      mode: 'solve',
+      state: 'queued',
+      phase: 'queued',
+      progress: 0,
+      model_id: 'm@sha256:abc',
+    },
+    'solve',
+  );
+  assert.equal(payload.async, true);
+  assert.match(String(payload.poll_command), /runs status --run-id run_123/);
+  assert.match(String(payload.wait_command), /runs wait --run-id run_123/);
+});
+
+test('buildRunStatusPayload marks terminal state', () => {
+  const payload = buildRunStatusPayload({
+    run_id: 'run_123',
+    mode: 'solve',
+    state: 'running',
+    phase: 'solve',
+    progress: 40,
+    model_id: 'm@sha256:abc',
+  });
+  assert.equal(payload.terminal, false);
+  assert.equal(payload.progress, 40);
 });
