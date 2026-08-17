@@ -6,7 +6,6 @@ import { Command } from 'commander';
 import { toAgentSpecBundle } from './agent-spec.js';
 import {
   clearCredentials,
-  loadIdentity,
   loadSession,
   resolveBackendUrl,
   saveConfig,
@@ -14,9 +13,11 @@ import {
 } from './auth.js';
 import { loginWithBrowser, sessionSummary } from './login.js';
 import { V3ApiClient } from './v3-client.js';
+import { assertSafeName } from './security.js';
 import {
   buildAsyncSubmitPayload,
   buildRunStatusPayload,
+  buildV3DryRun,
   downloadV3RunArtifacts,
   formatV3Error,
   fetchV3RunStatus,
@@ -30,24 +31,23 @@ import {
   scaffoldV3Project,
   waitV3Run,
 } from './v3-run.js';
+import { VERSION } from './version.js';
 
 const program = new Command();
 
 program
   .name('smart-planner')
-  .description('Smart Planner CLI — CSV datasets, immutable models, /v3 runs')
-  .version('0.3.1');
+  .description('Optivise CLI: transparent optimization runs for AI agents')
+  .version(VERSION);
 
 function getClientContext(explicitBackendUrl?: string): {
   config: UserConfig;
   session: ReturnType<typeof loadSession>;
-  identity: ReturnType<typeof loadIdentity>;
 } {
   try {
     return {
       config: resolveBackendUrl(explicitBackendUrl),
       session: loadSession(),
-      identity: loadIdentity(),
     };
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));
@@ -111,10 +111,11 @@ modelsCmd
   .option('--out <path>', 'Output CSV path')
   .description('Download one CSV template')
   .action(async (opts: { modelId: string; dataset: string; out?: string }) => {
+    const dataset = assertSafeName(opts.dataset, 'dataset name');
     const { config, session } = getClientContext();
     const client = new V3ApiClient(config, session);
-    const csv = await client.downloadTemplate(opts.modelId, opts.dataset);
-    const outPath = opts.out ?? `${opts.dataset}.csv`;
+    const csv = await client.downloadTemplate(opts.modelId, dataset);
+    const outPath = opts.out ?? `${dataset}.csv`;
     writeFileSync(outPath, csv, 'utf8');
     console.log(outPath);
   });
@@ -162,6 +163,7 @@ program
   .option('--config <path>', 'config.json path (default: project.yaml defaultConfig)')
   .option('--format <fmt>', 'json or text', 'text')
   .option('--verbose', 'Log run_id and phase progress to stderr')
+  .option('--dry-run', 'Inspect the exact request without submitting or writing files')
   .option('--async', 'Submit run and return immediately with run_id (poll with runs status/wait)')
   .option('--wait-timeout <sec>', 'Max seconds to wait when not using --async', parseWaitTimeout)
   .description('Validate CSV datasets (POST /v3/runs mode=validate)')
@@ -171,16 +173,37 @@ program
     config?: string;
     format: string;
     verbose?: boolean;
+    dryRun?: boolean;
     async?: boolean;
     waitTimeout?: number;
   }) => {
     const { config, session } = getClientContext();
     const projectRoot = process.cwd();
+    const modelId = resolveModelId(projectRoot, opts.modelId);
+    const dataDir = resolveDataDir(projectRoot, opts.dataDir);
+    const configPath = resolveConfigPath(projectRoot, opts.config);
+    if (opts.dryRun) {
+      console.log(
+        JSON.stringify(
+          await buildV3DryRun({
+            modelId,
+            dataDir,
+            configPath,
+            mode: 'validate',
+            session,
+            userConfig: config,
+          }),
+          null,
+          2,
+        ),
+      );
+      return;
+    }
     const result = await runV3Validate({
       projectRoot,
-      modelId: resolveModelId(projectRoot, opts.modelId),
-      dataDir: resolveDataDir(projectRoot, opts.dataDir),
-      configPath: resolveConfigPath(projectRoot, opts.config),
+      modelId,
+      dataDir,
+      configPath,
       session,
       userConfig: config,
       verbose: opts.verbose,
@@ -218,6 +241,7 @@ program
   .option('--out-dir <path>', 'Directory for result CSV artifacts (default: results/)')
   .option('--format <fmt>', 'json or text', 'text')
   .option('--verbose', 'Log run_id and phase progress to stderr')
+  .option('--dry-run', 'Inspect the exact request and expected writes without submitting')
   .option('--async', 'Submit solve and return immediately with run_id (poll with runs status/wait/download)')
   .option('--wait-timeout <sec>', 'Max seconds to wait when not using --async', parseWaitTimeout)
   .description('Solve and download result CSVs (POST /v3/runs mode=solve)')
@@ -228,16 +252,39 @@ program
     outDir?: string;
     format: string;
     verbose?: boolean;
+    dryRun?: boolean;
     async?: boolean;
     waitTimeout?: number;
   }) => {
     const { config, session } = getClientContext();
     const projectRoot = process.cwd();
+    const modelId = resolveModelId(projectRoot, opts.modelId);
+    const dataDir = resolveDataDir(projectRoot, opts.dataDir);
+    const configPath = resolveConfigPath(projectRoot, opts.config);
+    const outDir = resolveOutDir(projectRoot, opts.outDir);
+    if (opts.dryRun) {
+      console.log(
+        JSON.stringify(
+          await buildV3DryRun({
+            modelId,
+            dataDir,
+            configPath,
+            mode: 'solve',
+            outDir,
+            session,
+            userConfig: config,
+          }),
+          null,
+          2,
+        ),
+      );
+      return;
+    }
     const { run, outputFiles, asyncSubmitted } = await runV3Solve({
       projectRoot,
-      modelId: resolveModelId(projectRoot, opts.modelId),
-      dataDir: resolveDataDir(projectRoot, opts.dataDir),
-      configPath: resolveConfigPath(projectRoot, opts.config),
+      modelId,
+      dataDir,
+      configPath,
       outDir: opts.outDir,
       session,
       userConfig: config,
@@ -380,9 +427,9 @@ function parseWaitTimeout(value: string): number {
 
 program
   .command('login')
-  .requiredOption('--backend-url <url>', 'Smart Planner backend URL')
+  .requiredOption('--backend-url <url>', 'Optivise backend URL')
   .option('--local-dev', 'Skip browser and authorize local test account (dev only)')
-  .description('Open browser sign-in (Google/WeChat) and save session + HMAC credentials')
+  .description('Open browser sign-in and save a local bearer session')
   .action(async (opts: { backendUrl: string; localDev?: boolean }) => {
     const config = resolveBackendUrl(opts.backendUrl);
     saveConfig(config);
@@ -399,8 +446,7 @@ program
   .description('Print current principal (logged in) or anonymous')
   .action(() => {
     const session = loadSession();
-    const identity = loadIdentity();
-    console.log(sessionSummary(session, identity?.clientId));
+    console.log(sessionSummary(session));
     if (session?.email) {
       console.log(`email=${session.email}`);
     }
@@ -411,7 +457,7 @@ program
 
 program
   .command('logout')
-  .description('Clear saved session and HMAC credentials')
+  .description('Clear the saved session and remove legacy identity credentials')
   .action(() => {
     clearCredentials();
     console.log('Signed out');

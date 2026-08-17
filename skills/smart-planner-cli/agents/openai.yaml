@@ -1,0 +1,4 @@
+interface:
+  display_name: "Optivise CLI"
+  short_description: "Prepare and run transparent optimization jobs"
+  default_prompt: "Use $smart-planner-cli to inspect my planning data, ask for approval, and run an Optivise solve."

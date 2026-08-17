@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename } from 'node:path';
 
 import type { Session, UserConfig } from './auth.js';
+import { assertSafeName, fetchWithTimeout, normalizeBackendUrl, resolveDatasetFile } from './security.js';
 
 export interface V3ModelSummary {
   model_id: string;
@@ -64,14 +65,17 @@ export interface CreateV3RunRequest {
   mode: 'validate' | 'solve';
   model_id: string;
   config?: Record<string, unknown>;
-  metadata?: Record<string, unknown>;
 }
 
 export class V3ApiClient {
+  private readonly config: UserConfig;
+
   constructor(
-    private readonly config: UserConfig,
+    config: UserConfig,
     private readonly session?: Session | null,
-  ) {}
+  ) {
+    this.config = { backendUrl: normalizeBackendUrl(config.backendUrl) };
+  }
 
   private url(path: string): string {
     return `${this.config.backendUrl.replace(/\/$/, '')}${path}`;
@@ -94,7 +98,7 @@ export class V3ApiClient {
     }
     const query = params.toString();
     const path = `/v3/models${query ? `?${query}` : ''}`;
-    const resp = await fetch(this.url(path), { headers: this.authHeaders() });
+    const resp = await fetchWithTimeout(this.url(path), { headers: this.authHeaders() });
     if (!resp.ok) {
       throw new Error(`List models failed (${resp.status}): ${await resp.text()}`);
     }
@@ -103,7 +107,7 @@ export class V3ApiClient {
 
   async getModel(modelId: string): Promise<V3ModelDescriptor> {
     const path = `/v3/models/${encodeURIComponent(modelId)}`;
-    const resp = await fetch(this.url(path), { headers: this.authHeaders() });
+    const resp = await fetchWithTimeout(this.url(path), { headers: this.authHeaders() });
     if (!resp.ok) {
       throw new Error(`Get model failed (${resp.status}): ${await resp.text()}`);
     }
@@ -112,7 +116,7 @@ export class V3ApiClient {
 
   async downloadTemplate(modelId: string, dataset: string): Promise<string> {
     const path = `/v3/models/${encodeURIComponent(modelId)}/templates/${encodeURIComponent(dataset)}.csv`;
-    const resp = await fetch(this.url(path), { headers: this.authHeaders() });
+    const resp = await fetchWithTimeout(this.url(path), { headers: this.authHeaders() });
     if (!resp.ok) {
       throw new Error(`Download template failed (${resp.status}): ${await resp.text()}`);
     }
@@ -129,11 +133,11 @@ export class V3ApiClient {
     for (const file of csvFiles) {
       const content = readFileSync(file.path);
       const filename = `${file.dataset}.csv`;
-      form.append('files', new File([content], filename, { type: 'text/csv' }));
+      form.append('files', new Blob([content], { type: 'text/csv' }), filename);
     }
 
     const path = '/v3/runs';
-    const resp = await fetch(this.url(path), {
+    const resp = await fetchWithTimeout(this.url(path), {
       method: 'POST',
       headers: {
         ...this.authHeaders(),
@@ -150,7 +154,7 @@ export class V3ApiClient {
 
   async getRun(runId: string): Promise<{ run: V3Run; retryAfterMs: number | null }> {
     const path = `/v3/runs/${encodeURIComponent(runId)}`;
-    const resp = await fetch(this.url(path), { headers: this.authHeaders() });
+    const resp = await fetchWithTimeout(this.url(path), { headers: this.authHeaders() });
     if (!resp.ok) {
       throw new Error(`Get run failed (${resp.status}): ${await resp.text()}`);
     }
@@ -201,7 +205,7 @@ export class V3ApiClient {
 
   async downloadArtifact(runId: string, artifactId: string): Promise<string> {
     const path = `/v3/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}`;
-    const resp = await fetch(this.url(path), {
+    const resp = await fetchWithTimeout(this.url(path), {
       headers: {
         ...this.authHeaders(),
         Accept: 'text/csv',
@@ -215,17 +219,15 @@ export class V3ApiClient {
 }
 
 export function collectCsvFiles(dataDir: string, datasetNames: string[]): Array<{ dataset: string; path: string }> {
-  return datasetNames.map((dataset) => ({
-    dataset,
-    path: join(dataDir, `${dataset}.csv`),
-  }));
+  return datasetNames.map((dataset) => ({ dataset, path: resolveDatasetFile(dataDir, dataset) }));
 }
 
 export function discoverCsvFiles(dataDir: string): Array<{ dataset: string; path: string }> {
   return readdirSync(dataDir)
     .filter((name: string) => name.endsWith('.csv'))
-    .map((name: string) => ({
-      dataset: basename(name, '.csv'),
-      path: join(dataDir, name),
-    }));
+    .sort()
+    .map((name: string) => {
+      const dataset = assertSafeName(basename(name, '.csv'), 'dataset name');
+      return { dataset, path: resolveDatasetFile(dataDir, dataset) };
+    });
 }

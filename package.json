@@ -1,18 +1,22 @@
 {
   "name": "@smart-planner/cli",
-  "version": "0.3.1",
-  "description": "Smart Planner CLI — npx installable adapter workflow",
+  "version": "0.4.0",
+  "description": "Transparent optimization runs for AI agents",
   "type": "module",
   "bin": {
     "smart-planner": "dist/index.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "skills/smart-planner-cli"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.json",
     "prepublishOnly": "npm run build",
-    "test": "npm run build && node --test tests/*.test.js"
+    "test": "npm run build && node --test tests/*.test.js",
+    "test:package": "node scripts/check-package.mjs",
+    "test:skill": "node scripts/validate-skill.mjs",
+    "test:smoke": "npm run build && node scripts/smoke-package.mjs"
   },
   "dependencies": {
     "commander": "^12.1.0"
@@ -29,8 +33,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/leileibuild/smart-planner.git",
-    "directory": "cli"
+    "url": "git+https://github.com/leileibuild/optivise-cli.git"
   },
-  "license": "ISC"
+  "homepage": "https://github.com/leileibuild/optivise-cli#readme",
+  "bugs": {
+    "url": "https://github.com/leileibuild/optivise-cli/issues"
+  },
+  "license": "MIT"
 }

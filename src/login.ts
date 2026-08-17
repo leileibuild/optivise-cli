@@ -2,14 +2,13 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import {
-  generateIdentity,
   pkceChallenge,
   randomUrlSafe,
-  saveIdentity,
   saveSession,
   type Session,
   type UserConfig,
 } from './auth.js';
+import { fetchWithTimeout } from './security.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -27,8 +26,6 @@ interface DeviceTokenResponse {
   expires_in: number;
   principal_id: string;
   email?: string;
-  hmac_client_id?: string;
-  hmac_client_secret?: string;
 }
 
 async function openBrowser(url: string): Promise<void> {
@@ -66,7 +63,7 @@ export async function loginWithBrowser(
   const codeVerifier = randomUrlSafe(48);
   const codeChallenge = pkceChallenge(codeVerifier);
   const state = randomUrlSafe(24);
-  const startResp = await fetch(`${config.backendUrl}/v3/auth/device/start`, {
+  const startResp = await fetchWithTimeout(`${config.backendUrl}/v3/auth/device/start`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -83,7 +80,7 @@ export async function loginWithBrowser(
   console.error(`Opening browser for sign-in: ${authUrl}`);
 
   if (options?.localDev) {
-    const approveResp = await fetch(`${config.backendUrl}/v3/auth/device/local-authorize`, {
+    const approveResp = await fetchWithTimeout(`${config.backendUrl}/v3/auth/device/local-authorize`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ user_code: started.user_code, state }),
@@ -99,7 +96,7 @@ export async function loginWithBrowser(
   const deadline = Date.now() + (started.expires_in ?? 600) * 1000;
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, (started.interval ?? 2) * 1000));
-    const tokenResp = await fetch(`${config.backendUrl}${pollPath}`, {
+    const tokenResp = await fetchWithTimeout(`${config.backendUrl}${pollPath}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -114,16 +111,6 @@ export async function loginWithBrowser(
       throw new Error(`Device auth failed (${tokenResp.status}): ${await tokenResp.text()}`);
     }
     const payload = (await tokenResp.json()) as DeviceTokenResponse;
-    if (payload.hmac_client_id && payload.hmac_client_secret) {
-      saveIdentity({
-        clientId: payload.hmac_client_id,
-        clientSecret: payload.hmac_client_secret,
-        createdAt: new Date().toISOString(),
-      });
-    } else {
-      const identity = generateIdentity();
-      saveIdentity(identity);
-    }
     const session: Session = {
       accessToken: payload.access_token,
       tokenType: payload.token_type,
@@ -138,12 +125,6 @@ export async function loginWithBrowser(
   throw new Error('Sign-in timed out before the browser flow completed');
 }
 
-export function sessionSummary(session: Session | null, identityClientId?: string): string {
-  if (session) {
-    return session.principalId;
-  }
-  if (identityClientId) {
-    return identityClientId;
-  }
-  return 'anonymous';
+export function sessionSummary(session: Session | null): string {
+  return session?.principalId ?? 'anonymous';
 }

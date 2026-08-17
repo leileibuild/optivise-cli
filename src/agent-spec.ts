@@ -27,8 +27,10 @@ export function toAgentSpecBundle(descriptor: V3ModelDescriptor): Record<string,
     workflow: [
       'smart-planner init --model-id <model_id> [dir]',
       'Edit data/<dataset>.csv files and config.json',
-      'smart-planner validate',
-      'smart-planner solve --out-dir results',
+      'smart-planner validate --dry-run and show the manifest to the user',
+      'After explicit approval, smart-planner validate',
+      'smart-planner solve --dry-run and show the manifest to the user',
+      'After explicit approval, smart-planner solve --out-dir results',
     ],
     validate_rules: [
       'Each input file must be named exactly <dataset>.csv',

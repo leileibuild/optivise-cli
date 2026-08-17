@@ -9,6 +9,12 @@ import {
   type V3Run,
   type V3ValidationError,
 } from './v3-client.js';
+import {
+  assertSafeFilename,
+  assertSafeName,
+  inspectFile,
+  resolveOutputFile,
+} from './security.js';
 
 export function loadProjectYaml(projectRoot: string): Record<string, unknown> {
   const path = join(projectRoot, 'project.yaml');
@@ -83,11 +89,16 @@ export function loadRunConfig(configPath?: string): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
-async function resolveCsvFiles(
+async function prepareRun(
   dataDir: string,
   modelId: string,
   client: V3ApiClient,
-): Promise<Array<{ dataset: string; path: string }>> {
+  configPath?: string,
+): Promise<{
+  descriptor: Awaited<ReturnType<V3ApiClient['getModel']>>;
+  csvFiles: Array<{ dataset: string; path: string }>;
+  config: Record<string, unknown>;
+}> {
   const descriptor = await client.getModel(modelId);
   const requiredDatasets = descriptor.datasets
     .filter((item) => item.required !== false)
@@ -105,7 +116,73 @@ async function resolveCsvFiles(
       throw new Error(`Missing dataset file: ${file.path}`);
     }
   }
-  return csvFiles;
+  return { descriptor, csvFiles, config: loadRunConfig(configPath) };
+}
+
+export interface V3DryRunManifest {
+  dry_run: true;
+  target: {
+    backend: string;
+    descriptor_endpoint: string;
+    submission_endpoint: string;
+  };
+  request: {
+    mode: 'validate' | 'solve';
+    model_id: string;
+    config: Record<string, unknown>;
+    datasets: Array<{ dataset: string; path: string; bytes: number; sha256: string }>;
+  };
+  authentication: { mode: 'bearer' | 'anonymous'; credentials: 'redacted' | 'none' };
+  network: {
+    executed: Array<{ method: 'GET'; endpoint: string; purpose: string }>;
+    not_executed: Array<{ method: 'POST'; endpoint: string; purpose: string }>;
+  };
+  expected_local_writes: string[];
+}
+
+export async function buildV3DryRun(options: {
+  modelId: string;
+  dataDir: string;
+  configPath?: string;
+  mode: 'validate' | 'solve';
+  outDir?: string;
+  session?: Session | null;
+  userConfig: UserConfig;
+}): Promise<V3DryRunManifest> {
+  const client = new V3ApiClient(options.userConfig, options.session);
+  const prepared = await prepareRun(options.dataDir, options.modelId, client, options.configPath);
+  const descriptorEndpoint = `${options.userConfig.backendUrl}/v3/models/${encodeURIComponent(options.modelId)}`;
+  const submissionEndpoint = `${options.userConfig.backendUrl}/v3/runs`;
+  const expectedLocalWrites =
+    options.mode === 'solve'
+      ? prepared.descriptor.result_datasets.map((dataset) => {
+          const filename = `${assertSafeName(dataset.name, 'result dataset name')}.csv`;
+          return resolveOutputFile(options.outDir ?? resolve(process.cwd(), 'results'), filename);
+        })
+      : [];
+
+  return {
+    dry_run: true,
+    target: {
+      backend: options.userConfig.backendUrl,
+      descriptor_endpoint: descriptorEndpoint,
+      submission_endpoint: submissionEndpoint,
+    },
+    request: {
+      mode: options.mode,
+      model_id: options.modelId,
+      config: prepared.config,
+      datasets: prepared.csvFiles.map((file) => ({ dataset: file.dataset, ...inspectFile(file.path) })),
+    },
+    authentication: options.session?.accessToken
+      ? { mode: 'bearer', credentials: 'redacted' }
+      : { mode: 'anonymous', credentials: 'none' },
+    network: {
+      executed: [{ method: 'GET', endpoint: descriptorEndpoint, purpose: 'resolve model datasets' }],
+      not_executed: [{ method: 'POST', endpoint: submissionEndpoint, purpose: 'submit datasets and configuration' }],
+    },
+    expected_local_writes: expectedLocalWrites,
+  };
 }
 
 export interface V3ValidateResult {
@@ -180,14 +257,17 @@ export async function submitV3Run(options: {
   userConfig: UserConfig;
 }): Promise<V3Run> {
   const client = new V3ApiClient(options.userConfig, options.session);
-  const csvFiles = await resolveCsvFiles(options.dataDir, options.modelId, client);
-  const config = loadRunConfig(options.configPath);
+  const { csvFiles, config } = await prepareRun(
+    options.dataDir,
+    options.modelId,
+    client,
+    options.configPath,
+  );
   const { run } = await client.createRun(
     {
       mode: options.mode,
       model_id: options.modelId,
       config,
-      metadata: { cli: 'smart-planner', command: options.mode, async: true },
     },
     csvFiles,
   );
@@ -241,11 +321,15 @@ export async function downloadV3RunArtifacts(options: {
   if (run.state !== 'succeeded') {
     throw new Error(`Run is not ready for download (state=${run.state}). Poll with runs status/wait.`);
   }
+  const artifacts = (run.artifacts ?? []).map((artifact) => ({
+    ...artifact,
+    filename: assertSafeFilename(artifact.filename),
+  }));
   mkdirSync(options.outDir, { recursive: true });
   const outputFiles: string[] = [];
-  for (const artifact of run.artifacts ?? []) {
+  for (const artifact of artifacts) {
     const csv = await client.downloadArtifact(run.run_id, artifact.artifact_id);
-    const outPath = join(options.outDir, artifact.filename);
+    const outPath = resolveOutputFile(options.outDir, artifact.filename);
     writeFileSync(outPath, csv, 'utf8');
     outputFiles.push(outPath);
   }
@@ -286,15 +370,18 @@ export async function runV3Validate(options: {
   }
 
   const client = new V3ApiClient(options.userConfig, options.session);
-  const csvFiles = await resolveCsvFiles(options.dataDir, options.modelId, client);
-  const config = loadRunConfig(options.configPath);
+  const { csvFiles, config } = await prepareRun(
+    options.dataDir,
+    options.modelId,
+    client,
+    options.configPath,
+  );
 
   const { run } = await client.createRun(
     {
       mode: 'validate',
       model_id: options.modelId,
       config,
-      metadata: { cli: 'smart-planner', command: 'validate' },
     },
     csvFiles,
   );
@@ -355,15 +442,18 @@ export async function runV3Solve(options: {
   }
 
   const client = new V3ApiClient(options.userConfig, options.session);
-  const csvFiles = await resolveCsvFiles(options.dataDir, options.modelId, client);
-  const config = loadRunConfig(options.configPath);
+  const { csvFiles, config } = await prepareRun(
+    options.dataDir,
+    options.modelId,
+    client,
+    options.configPath,
+  );
 
   const { run } = await client.createRun(
     {
       mode: 'solve',
       model_id: options.modelId,
       config,
-      metadata: { cli: 'smart-planner', command: 'solve' },
     },
     csvFiles,
   );
@@ -392,11 +482,15 @@ export async function runV3Solve(options: {
   }
 
   const outDir = resolveOutDir(options.projectRoot, options.outDir);
+  const artifacts = (final.artifacts ?? []).map((artifact) => ({
+    ...artifact,
+    filename: assertSafeFilename(artifact.filename),
+  }));
   mkdirSync(outDir, { recursive: true });
   const outputFiles: string[] = [];
-  for (const artifact of final.artifacts ?? []) {
+  for (const artifact of artifacts) {
     const csv = await client.downloadArtifact(final.run_id, artifact.artifact_id);
-    const outPath = join(outDir, artifact.filename);
+    const outPath = resolveOutputFile(outDir, artifact.filename);
     writeFileSync(outPath, csv, 'utf8');
     outputFiles.push(outPath);
   }
@@ -426,11 +520,12 @@ export async function scaffoldV3Project(
 ): Promise<void> {
   const client = new V3ApiClient(userConfig, session);
   const descriptor = await client.getModel(modelId);
+  const datasets = descriptor.datasets.map((dataset) => assertSafeName(dataset.name, 'dataset name'));
   mkdirSync(join(targetDir, 'data'), { recursive: true });
 
-  for (const dataset of descriptor.datasets) {
-    const csv = await client.downloadTemplate(modelId, dataset.name);
-    writeFileSync(join(targetDir, 'data', `${dataset.name}.csv`), csv, 'utf8');
+  for (const dataset of datasets) {
+    const csv = await client.downloadTemplate(modelId, dataset);
+    writeFileSync(resolveOutputFile(join(targetDir, 'data'), `${dataset}.csv`), csv, 'utf8');
   }
 
   const projectYaml = [
@@ -464,8 +559,9 @@ export async function scaffoldV3Project(
       '',
       '1. Edit CSV files under `data/` (one file per dataset: `<name>.csv`)',
       '2. Adjust `config.json` (constraints, objectives, weights, parameters, solver)',
-      '3. `smart-planner validate`',
-      '4. `smart-planner solve`',
+      '3. `smart-planner validate --dry-run` and review the manifest',
+      '4. After approval, `smart-planner validate`',
+      '5. `smart-planner solve --dry-run`, review it, then run `smart-planner solve`',
       '',
     ].join('\n'),
     'utf8',
