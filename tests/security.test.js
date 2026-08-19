@@ -19,7 +19,14 @@ const descriptor = {
   description: 'Allocate work.',
   adapter_revision: 'sha256:abc',
   solver_compatibility: ['reference'],
-  datasets: [{ name: 'work_items', required: true }],
+  datasets: [{
+    name: 'work_items',
+    required: true,
+    fields: [
+      { name: 'work_item_id', type: 'string', nullable: false },
+      { name: 'workload', type: 'number', nullable: false },
+    ],
+  }],
   result_datasets: [{ name: 'allocations' }],
   config_schema: { type: 'object' },
   constraints: [],
@@ -77,6 +84,40 @@ test('dry-run fetches only the descriptor, writes nothing, and redacts bearer au
   });
 });
 
+test('dry-run rejects non-canonical booleans before any run submission', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'optivise-dry-run-bool-'));
+  const dataDir = join(root, 'data');
+  mkdirSync(dataDir);
+  writeFileSync(join(dataDir, 'items.csv'), 'item_id,required\nA,True\n', 'utf8');
+  const booleanDescriptor = {
+    ...descriptor,
+    datasets: [{
+      name: 'items',
+      required: true,
+      fields: [
+        { name: 'item_id', type: 'string', nullable: false },
+        { name: 'required', type: 'boolean', nullable: false },
+      ],
+    }],
+  };
+  const requests = [];
+  await withMockFetch(async (input, init = {}) => {
+    requests.push(init.method ?? 'GET');
+    return new Response(JSON.stringify(booleanDescriptor), { headers: { 'Content-Type': 'application/json' } });
+  }, async (backendUrl) => {
+    await assert.rejects(
+      buildV3DryRun({
+        modelId: booleanDescriptor.model_id,
+        dataDir,
+        mode: 'solve',
+        userConfig: { backendUrl },
+      }),
+      /invalid_boolean.*items\.required/,
+    );
+    assert.deepEqual(requests, ['GET']);
+  });
+});
+
 test('dataset names and escaping symlinks are rejected', () => {
   const root = mkdtempSync(join(tmpdir(), 'optivise-path-'));
   const dataDir = join(root, 'data');
@@ -128,7 +169,7 @@ test('async validation sends only the documented request fields and selected CSV
   const root = mkdtempSync(join(tmpdir(), 'optivise-submit-'));
   const dataDir = join(root, 'data');
   mkdirSync(dataDir);
-  writeFileSync(join(dataDir, 'work_items.csv'), 'item_id,required_units,priority\nA,1,1\n', 'utf8');
+  writeFileSync(join(dataDir, 'work_items.csv'), 'work_item_id,workload\nA,1\n', 'utf8');
   const seen = [];
   await withMockFetch(async (input, init = {}) => {
     const path = new URL(String(input)).pathname;

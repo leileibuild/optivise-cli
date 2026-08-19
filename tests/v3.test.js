@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   buildAsyncSubmitPayload,
   buildRunStatusPayload,
+  downloadArtifactsAtomically,
   formatV3Error,
   isTerminalRunState,
   loadRunConfig,
@@ -11,7 +12,7 @@ import {
   resolveOutDir,
 } from '../dist/v3-run.js';
 import { collectCsvFiles, discoverCsvFiles } from '../dist/v3-client.js';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -47,14 +48,14 @@ test('discoverCsvFiles finds csv files in directory', () => {
 test('loadRunConfig parses json object', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sp-cli-'));
   const path = join(dir, 'config.json');
-  writeFileSync(path, JSON.stringify({ solver: { time_limit_seconds: 30 } }), 'utf8');
+  writeFileSync(path, JSON.stringify({ solver: { max_time_in_seconds: 1, num_workers: 1, random_seed: 0, log_search_progress: false } }), 'utf8');
   const config = loadRunConfig(path);
-  assert.deepEqual(config.solver, { time_limit_seconds: 30 });
+  assert.deepEqual(config.solver, { max_time_in_seconds: 1, num_workers: 1, random_seed: 0, log_search_progress: false });
 });
 
 test('resolveConfigPath and resolveOutDir use project defaults', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sp-cli-'));
-  writeFileSync(join(dir, 'project.yaml'), 'model_id: m@sha256:1\ndataDir: data\ndefaultConfig: config.json\noutDir: out\n', 'utf8');
+  writeFileSync(join(dir, 'project.json'), JSON.stringify({ schema_version: 1, model_id: 'm@sha256:1', data_dir: 'data', config_path: 'config.json', out_dir: 'out' }), 'utf8');
   writeFileSync(join(dir, 'config.json'), '{}', 'utf8');
   assert.equal(resolveConfigPath(dir), join(dir, 'config.json'));
   assert.equal(resolveOutDir(dir), join(dir, 'out'));
@@ -94,4 +95,52 @@ test('buildRunStatusPayload marks terminal state', () => {
   });
   assert.equal(payload.terminal, false);
   assert.equal(payload.progress, 40);
+});
+
+test('artifact batch is published only after every download succeeds', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'optivise-artifacts-ok-'));
+  const outDir = join(root, 'results');
+  const files = await downloadArtifactsAtomically(
+    outDir,
+    [{ filename: 'schedule.csv' }, { filename: 'summary.csv' }],
+    async ({ filename }) => `name\n${filename}\n`,
+  );
+  assert.deepEqual(files, [join(outDir, 'schedule.csv'), join(outDir, 'summary.csv')]);
+  assert.match(readFileSync(files[0], 'utf8'), /schedule\.csv/);
+});
+
+test('artifact failure exposes no partial result files', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'optivise-artifacts-fail-'));
+  const outDir = join(root, 'results');
+  await assert.rejects(
+    downloadArtifactsAtomically(
+      outDir,
+      [{ filename: 'schedule.csv' }, { filename: 'summary.csv' }],
+      async ({ filename }) => {
+        if (filename === 'summary.csv') throw new Error('network interrupted');
+        return 'operation\nCUT\n';
+      },
+    ),
+    /artifact_unavailable: could not retrieve the complete result; no complete result was produced/,
+  );
+  assert.equal(existsSync(outDir), false);
+  assert.deepEqual(readdirSync(root), []);
+});
+
+test('artifact failure does not overwrite an existing result directory', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'optivise-artifacts-existing-'));
+  const outDir = join(root, 'results');
+  await downloadArtifactsAtomically(outDir, [{ filename: 'schedule.csv' }], async () => 'old\nresult\n');
+  await assert.rejects(
+    downloadArtifactsAtomically(
+      outDir,
+      [{ filename: 'schedule.csv' }, { filename: 'summary.csv' }],
+      async ({ filename }) => {
+        if (filename === 'summary.csv') throw new Error('network interrupted');
+        return 'new\nresult\n';
+      },
+    ),
+    /artifact_unavailable/,
+  );
+  assert.equal(readFileSync(join(outDir, 'schedule.csv'), 'utf8'), 'old\nresult\n');
 });

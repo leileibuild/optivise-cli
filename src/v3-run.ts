@@ -1,7 +1,9 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 
 import type { Session, UserConfig } from './auth.js';
+import { DatasetValidationError, validateDatasetFiles } from './dataset-validation.js';
 import {
   collectCsvFiles,
   discoverCsvFiles,
@@ -16,41 +18,28 @@ import {
   resolveOutputFile,
 } from './security.js';
 
-export function loadProjectYaml(projectRoot: string): Record<string, unknown> {
-  const path = join(projectRoot, 'project.yaml');
-  if (!existsSync(path)) {
-    return {};
-  }
-  const text = readFileSync(path, 'utf8');
-  const result: Record<string, unknown> = {};
-  for (const line of text.split('\n')) {
-    const match = line.match(/^([a-zA-Z0-9_]+):\s*(.+)$/);
-    if (match) {
-      result[match[1]] = match[2].trim();
-    }
-  }
-  return result;
-}
-
 export function resolveModelId(projectRoot: string, arg?: string): string {
   if (arg) {
     return arg;
   }
-  const project = loadProjectYaml(projectRoot);
-  if (typeof project.model_id === 'string') {
-    return project.model_id;
-  }
-  throw new Error('Missing --model-id (or model_id in project.yaml)');
+  const json = loadProjectJson(projectRoot);
+  if (typeof json.model_id === 'string') return json.model_id;
+  throw new Error('Missing --model (or model_id in project.json)');
+}
+
+export interface ProjectDocument { schema_version: 1; model_id: string; profile_id: string; data_dir: string; config_path: string; mapping_path: string; out_dir: string }
+export function loadProjectJson(projectRoot: string): Partial<ProjectDocument> {
+  const path = join(projectRoot, 'project.json'); if (!existsSync(path)) return {};
+  const value = JSON.parse(readFileSync(path, 'utf8')) as Partial<ProjectDocument>;
+  if (value.schema_version !== 1) throw new Error('project.json must use schema_version=1'); return value;
 }
 
 export function resolveDataDir(projectRoot: string, arg?: string): string {
   if (arg) {
     return resolve(projectRoot, arg);
   }
-  const project = loadProjectYaml(projectRoot);
-  if (typeof project.dataDir === 'string') {
-    return resolve(projectRoot, project.dataDir);
-  }
+  const project = loadProjectJson(projectRoot);
+  if (typeof project.data_dir === 'string') return resolve(projectRoot, project.data_dir);
   return resolve(projectRoot, 'data');
 }
 
@@ -58,10 +47,8 @@ export function resolveConfigPath(projectRoot: string, arg?: string): string | u
   if (arg) {
     return resolve(projectRoot, arg);
   }
-  const project = loadProjectYaml(projectRoot);
-  if (typeof project.defaultConfig === 'string') {
-    return resolve(projectRoot, project.defaultConfig);
-  }
+  const project = loadProjectJson(projectRoot);
+  if (typeof project.config_path === 'string') return resolve(projectRoot, project.config_path);
   const defaultPath = join(projectRoot, 'config.json');
   return existsSync(defaultPath) ? defaultPath : undefined;
 }
@@ -70,10 +57,8 @@ export function resolveOutDir(projectRoot: string, arg?: string): string {
   if (arg) {
     return resolve(projectRoot, arg);
   }
-  const project = loadProjectYaml(projectRoot);
-  if (typeof project.outDir === 'string') {
-    return resolve(projectRoot, project.outDir);
-  }
+  const project = loadProjectJson(projectRoot);
+  if (typeof project.out_dir === 'string') return resolve(projectRoot, project.out_dir);
   return resolve(projectRoot, 'results');
 }
 
@@ -100,9 +85,29 @@ async function prepareRun(
   config: Record<string, unknown>;
 }> {
   const descriptor = await client.getModel(modelId);
-  const requiredDatasets = descriptor.datasets
-    .filter((item) => item.required !== false)
-    .map((item) => item.name);
+  const config = loadRunConfig(configPath);
+  const required = new Set(descriptor.datasets.filter((item) => item.required !== false).map((item) => item.name));
+  const profileId = typeof config.profile_id === 'string' ? config.profile_id : undefined;
+  const profile = profileId ? descriptor.profiles?.find((item) => item.id === profileId) : undefined;
+  if (profileId && !profile) throw new Error(`Unknown profile: ${profileId}`);
+  for (const dataset of profile?.required_datasets ?? []) required.add(dataset);
+  const constraintConfig = (config.constraints && typeof config.constraints === 'object' ? config.constraints : {}) as Record<string, unknown>;
+  const objectiveConfig = (config.objectives && typeof config.objectives === 'object' ? config.objectives : {}) as Record<string, any>;
+  for (const term of [...(descriptor.constraints ?? []), ...(descriptor.objectives ?? [])]) {
+    const profileConstraints = (profile as any)?.constraints ?? {};
+    const profileObjectives = (profile as any)?.objectives ?? {};
+    const active = term.id in constraintConfig
+      ? constraintConfig[term.id] === true
+      : term.id in objectiveConfig
+        ? Boolean(objectiveConfig[term.id]?.enabled)
+        : term.id in profileConstraints
+          ? profileConstraints[term.id] === true
+          : term.id in profileObjectives
+            ? Boolean(profileObjectives[term.id]?.enabled)
+            : (term as any).default_enabled !== false;
+    if (active) for (const dataset of term.required_datasets ?? []) required.add(dataset);
+  }
+  const requiredDatasets = [...required];
   const csvFiles =
     requiredDatasets.length > 0
       ? collectCsvFiles(dataDir, requiredDatasets)
@@ -116,7 +121,9 @@ async function prepareRun(
       throw new Error(`Missing dataset file: ${file.path}`);
     }
   }
-  return { descriptor, csvFiles, config: loadRunConfig(configPath) };
+  const diagnostics = validateDatasetFiles(descriptor, csvFiles);
+  if (diagnostics.length) throw new DatasetValidationError(diagnostics);
+  return { descriptor, csvFiles, config };
 }
 
 export interface V3DryRunManifest {
@@ -200,7 +207,17 @@ export interface V3ValidateResult {
 }
 
 export function isTerminalRunState(state: string): boolean {
-  return state === 'succeeded' || state === 'failed';
+  return state === 'succeeded' || state === 'failed' || state === 'cancelled';
+}
+
+export function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') return `{${Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(',')}}`;
+  return JSON.stringify(value);
+}
+export function manifestId(manifest: Record<string, unknown>): string {
+  const copy = { ...manifest }; delete copy.manifest_id;
+  return createHash('sha256').update(canonicalJson(copy)).digest('hex');
 }
 
 export function buildRunStatusPayload(run: V3Run, extras: Record<string, unknown> = {}): Record<string, unknown> {
@@ -214,7 +231,7 @@ export function buildRunStatusPayload(run: V3Run, extras: Record<string, unknown
     progress: run.progress,
     terminal,
     errors: run.errors ?? [],
-    summary: run.summary,
+    result: run.result,
     artifacts: run.artifacts,
     validation_report: run.validation_report,
     build_summary: run.build_summary,
@@ -255,6 +272,7 @@ export async function submitV3Run(options: {
   mode: 'validate' | 'solve';
   session?: Session | null;
   userConfig: UserConfig;
+  idempotencyKey?: string;
 }): Promise<V3Run> {
   const client = new V3ApiClient(options.userConfig, options.session);
   const { csvFiles, config } = await prepareRun(
@@ -270,6 +288,7 @@ export async function submitV3Run(options: {
       config,
     },
     csvFiles,
+    options.idempotencyKey,
   );
   return run;
 }
@@ -325,15 +344,49 @@ export async function downloadV3RunArtifacts(options: {
     ...artifact,
     filename: assertSafeFilename(artifact.filename),
   }));
-  mkdirSync(options.outDir, { recursive: true });
-  const outputFiles: string[] = [];
-  for (const artifact of artifacts) {
-    const csv = await client.downloadArtifact(run.run_id, artifact.artifact_id);
-    const outPath = resolveOutputFile(options.outDir, artifact.filename);
-    writeFileSync(outPath, csv, 'utf8');
-    outputFiles.push(outPath);
-  }
+  const outputFiles = await downloadArtifactsAtomically(
+    options.outDir,
+    artifacts,
+    (artifact) => client.downloadArtifact(run.run_id, artifact.artifact_id),
+  );
   return { run, outputFiles };
+}
+
+/**
+ * Download every artifact before exposing any result file to the caller.
+ * A failed artifact request must not leave a partial result directory that an
+ * agent could mistake for an authoritative solution.
+ */
+export async function downloadArtifactsAtomically<T extends { filename: string }>(
+  outDir: string,
+  artifacts: T[],
+  download: (artifact: T) => Promise<string>,
+): Promise<string[]> {
+  const parent = dirname(outDir);
+  mkdirSync(parent, { recursive: true });
+  const staging = mkdtempSync(join(parent, `.${basename(outDir)}.fetch-`));
+  try {
+    const staged: Array<{ artifact: T; path: string }> = [];
+    for (const artifact of artifacts) {
+      const csv = await download(artifact);
+      const path = resolveOutputFile(staging, artifact.filename);
+      writeFileSync(path, csv, 'utf8');
+      staged.push({ artifact, path });
+    }
+
+    mkdirSync(outDir, { recursive: true });
+    const outputFiles: string[] = [];
+    for (const { artifact, path } of staged) {
+      const outPath = resolveOutputFile(outDir, artifact.filename);
+      renameSync(path, outPath);
+      outputFiles.push(outPath);
+    }
+    return outputFiles;
+  } catch (error) {
+    throw new Error(`artifact_unavailable: could not retrieve the complete result; no complete result was produced (${String(error)})`);
+  } finally {
+    rmSync(staging, { recursive: true, force: true });
+  }
 }
 
 export async function runV3Validate(options: {
@@ -512,58 +565,16 @@ export function formatV3Error(error: V3ValidationError): string {
   return parts.join(': ');
 }
 
-export async function scaffoldV3Project(
-  userConfig: UserConfig,
-  modelId: string,
-  targetDir: string,
-  session?: Session | null,
-): Promise<void> {
-  const client = new V3ApiClient(userConfig, session);
-  const descriptor = await client.getModel(modelId);
-  const datasets = descriptor.datasets.map((dataset) => assertSafeName(dataset.name, 'dataset name'));
-  mkdirSync(join(targetDir, 'data'), { recursive: true });
-
-  for (const dataset of datasets) {
-    const csv = await client.downloadTemplate(modelId, dataset);
-    writeFileSync(resolveOutputFile(join(targetDir, 'data'), `${dataset}.csv`), csv, 'utf8');
-  }
-
-  const projectYaml = [
-    `model_id: ${modelId}`,
-    'dataDir: data',
-    'defaultConfig: config.json',
-    'outDir: results',
-    '',
-  ].join('\n');
-  writeFileSync(join(targetDir, 'project.yaml'), projectYaml, 'utf8');
-
-  const exampleConfig = descriptor.examples?.[0]?.config ?? {
-    constraints: Object.fromEntries(
-      (descriptor.constraints ?? []).map((item) => [item.id, item.default ?? true]),
-    ),
-    objectives: Object.fromEntries(
-      (descriptor.objectives ?? []).map((item) => [item.id, item.default ?? true]),
-    ),
-    solver: { time_limit_seconds: 60, workers: 4 },
-  };
-  writeFileSync(join(targetDir, 'config.json'), JSON.stringify(exampleConfig, null, 2), 'utf8');
-
-  writeFileSync(
-    join(targetDir, 'README.md'),
-    [
-      `# ${descriptor.name}`,
-      '',
-      descriptor.description,
-      '',
-      '## CSV workflow',
-      '',
-      '1. Edit CSV files under `data/` (one file per dataset: `<name>.csv`)',
-      '2. Adjust `config.json` (constraints, objectives, weights, parameters, solver)',
-      '3. `smart-planner validate --dry-run` and review the manifest',
-      '4. After approval, `smart-planner validate`',
-      '5. `smart-planner solve --dry-run`, review it, then run `smart-planner solve`',
-      '',
-    ].join('\n'),
-    'utf8',
-  );
+export async function scaffoldCanonicalProject(userConfig: UserConfig, modelId: string, profileId: string, targetDir: string, session?: Session | null): Promise<ProjectDocument> {
+  const client = new V3ApiClient(userConfig, session); const descriptor = await client.getModel(modelId);
+  const profile = (descriptor.profiles ?? []).find((p) => p.id === profileId); if ((descriptor.profiles?.length ?? 0) > 0 && !profile) throw new Error(`Unknown profile for model: ${profileId}`);
+  mkdirSync(join(targetDir, 'data'), { recursive: true }); mkdirSync(join(targetDir, 'results'), { recursive: true });
+  for (const dataset of descriptor.datasets) { const name = assertSafeName(dataset.name, 'dataset name'); const csv = await client.downloadTemplate(modelId, name); writeFileSync(resolveOutputFile(join(targetDir, 'data'), `${name}.csv`), csv, 'utf8'); }
+  const project: ProjectDocument = { schema_version: 1, model_id: modelId, profile_id: profileId, data_dir: 'data', config_path: 'config.json', mapping_path: 'mapping.json', out_dir: 'results' };
+  writeFileSync(join(targetDir, 'project.json'), JSON.stringify(project, null, 2) + '\n', 'utf8');
+  const constraints = Object.fromEntries((descriptor.constraints ?? []).map((x) => [x.id, x.default_enabled ?? true]));
+  const objectives = Object.fromEntries((descriptor.objectives ?? []).map((x) => [x.id, { enabled: x.default_enabled ?? true, weight: x.default_weight ?? 1 }]));
+  writeFileSync(join(targetDir, 'config.json'), JSON.stringify({ profile_id: profileId, constraints, objectives, parameters: {}, solver: { max_time_in_seconds: 1, num_workers: 1, random_seed: 0, log_search_progress: false }, extras: {} }, null, 2) + '\n', 'utf8');
+  writeFileSync(join(targetDir, 'mapping.json'), JSON.stringify({ schema_version: 1, rules: [] }, null, 2) + '\n', 'utf8');
+  return project;
 }

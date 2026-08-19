@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { cpSync, mkdirSync, mkdtempSync, readdirSync, renameSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -47,5 +47,15 @@ if (installResult.status !== 0) {
 }
 const binary = join(install, 'node_modules', '@smart-planner', 'cli', 'dist', 'index.js');
 assert.match(run(process.execPath, [binary, '--help'], { cwd: temp }), /Optivise CLI/);
-assert.equal(run(process.execPath, [binary, '--version'], { cwd: temp }).trim(), '0.4.0');
+assert.equal(run(process.execPath, [binary, '--version'], { cwd: temp }).trim(), '1.0.1');
+const skillsDir = join(temp, 'codex-skills');
+run(process.execPath, [binary, 'skill', 'install', '--target', 'codex', '--dir', skillsDir], { cwd: temp });
+assert.ok(existsSync(join(skillsDir, 'optivise-cli', 'SKILL.md')));
+assert.ok(existsSync(join(skillsDir, 'optivise-cli', 'references', 'commands.md')));
+assert.ok(existsSync(join(skillsDir, 'optivise-cli', 'references', 'security.md')));
+assert.ok(existsSync(join(skillsDir, 'optivise-cli', 'agents', 'openai.yaml')));
+assert.ok(existsSync(join(skillsDir, 'smart-planner-cli', 'SKILL.md')));
+const doctor = JSON.parse(run(process.execPath, [binary, 'skill', 'doctor', '--target', 'codex', '--dir', skillsDir], { cwd: temp }));
+assert.equal(doctor.ok, true);
+assert.equal(doctor.implicit_invocation, true);
 console.log(`Clean tarball install passed: ${tarball}`);

@@ -1,6 +1,6 @@
 # Agent platform guides
 
-These examples show how to hand an agent the portable `$smart-planner-cli` workflow. The CLI and fixture are tested locally. Platform integrations are setup guidance only unless a guide says otherwise. A platform must expose a user-approved local command runner before an agent can install or invoke npm.
+These examples show how to hand an agent the portable `$optivise-cli` workflow. The CLI and fixture are tested locally. Platform integrations are setup guidance only unless a guide says otherwise. A platform must expose a user-approved local command runner before an agent can install or invoke npm.
 
 | Platform | Label | Guide |
 | --- | --- | --- |

@@ -13,10 +13,10 @@ if (packed.status !== 0) {
 
 const [manifest] = JSON.parse(packed.stdout);
 const files = manifest.files.map((entry) => entry.path);
-const allowed = /^(dist\/|skills\/smart-planner-cli\/|LICENSE$|README\.md$|package\.json$)/;
+const allowed = /^(dist\/|skills\/(smart-planner-cli|optivise-cli)\/|LICENSE$|README\.md$|package\.json$)/;
 const unexpected = files.filter((path) => !allowed.test(path));
 assert.deepEqual(unexpected, [], `Unexpected files in npm package: ${unexpected.join(', ')}`);
-for (const required of ['dist/index.js', 'skills/smart-planner-cli/SKILL.md', 'LICENSE', 'README.md']) {
+for (const required of ['dist/index.js', 'skills/optivise-cli/SKILL.md', 'skills/optivise-cli/agents/openai.yaml', 'skills/optivise-cli/references/commands.md', 'skills/smart-planner-cli/SKILL.md', 'LICENSE', 'README.md']) {
   assert.ok(files.includes(required), `Missing required package file: ${required}`);
 }
 console.log(`Package allowlist passed (${files.length} files)`);

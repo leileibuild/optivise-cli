@@ -4,21 +4,18 @@ This document is the authoritative map of network-capable commands. No command m
 
 | Command | Network behavior | Local reads | Local writes |
 | --- | --- | --- | --- |
-| `models list` | `GET /v3/models` | Config and session | None |
-| `models get` | `GET /v3/models/{model_id}` | Config and session | None |
-| `models template` | `GET /v3/models/{model_id}/templates/{dataset}.csv` | Config and session | The explicit `--out` CSV, or `<dataset>.csv` |
-| `spec` | `GET /v3/models/{model_id}` | Config, project, session | None |
-| `init` | Descriptor `GET` plus one template `GET` per descriptor dataset | Config and session | The selected project directory, templates, `project.yaml`, `config.json`, and README |
-| `validate --dry-run` | Descriptor `GET` only | Project, config, required CSV files | None |
-| `validate` | Descriptor `GET`, then `POST /v3/runs` with named CSV files and configuration. Async mode may poll `GET /v3/runs/{run_id}`. | Project, config, CSV files, session | None |
-| `solve --dry-run` | Descriptor `GET` only | Project, config, required CSV files | None |
-| `solve` | Descriptor `GET`, then `POST /v3/runs`; sync mode polls; solve artifacts use `GET /v3/runs/{run_id}/artifacts/{artifact_id}` | Project, config, CSV files, session | Result CSV files under `--out-dir` |
-| `runs status` | `GET /v3/runs/{run_id}` | Config and session | None |
-| `runs wait` | Repeated `GET /v3/runs/{run_id}` until terminal or timeout | Config and session | None |
-| `runs download` | Run `GET`, then one artifact `GET` per result | Config and session | Result CSV files under `--out-dir` |
-| `login` | Device-auth `POST` and token polling `POST` requests | Config | `~/.smartplanner/config.json` and `session.json` |
+| `describe-models` | `GET /v3/models` | Config and session | None |
+| `model-info` / `schema-template` | Descriptor/template `GET` | Config and session | Only explicit output paths |
+| `scaffold` | Descriptor `GET` plus one template `GET` per descriptor dataset | Config and session | Canonical project directory and templates |
+| `lint` | Descriptor `GET` plus local checks | Project, config, mapping, named data | None |
+| `dryrun` | Descriptor `GET` only; never `POST /v3/runs` | Project, config, mapping output, named data | Optional manifest and local manifest store |
+| `run` | Repeats descriptor `GET`, verifies the exact manifest, then `POST /v3/runs`; `--wait` polls | Project, config, manifest, named CSV files, session | Run metadata |
+| `status` / `runs list` | `GET /v3/runs/{run_id}` or `GET /v3/runs` | Config and session | Local run index |
+| `fetch` | Run `GET`, then one artifact `GET` per result | Config and session | Result CSV files under `--out` |
+| `cancel` / `recover` | Cancel `POST` or run `GET`; recover never uploads | Config, session, local run index | Local recovery metadata |
+| `login` | Device-auth `POST` and token polling `POST` requests | Config | `~/.optivise/config.json` and session data |
 | `whoami` | None | Session | None |
-| `logout` | None | Session and legacy identity path | Deletes session and any old `identity.json` |
+| `logout` | None | Session | Deletes the local session |
 
 All requests use the configured backend URL. HTTPS is required except for loopback development addresses. Each request has a 30-second timeout. The client does not attach command metadata or telemetry.
 

@@ -1,4 +1,0 @@
-model_id: capacity-planning@sha256:3c52f6d1
-dataDir: data
-defaultConfig: config.json
-outDir: results

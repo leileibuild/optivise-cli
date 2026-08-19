@@ -1,27 +1,23 @@
 # Commands
 
 ```bash
-smart-planner models list --format json
-smart-planner models get --model-id <model_id> --format json
-smart-planner init --model-id <model_id> ./my-project
+optivise describe-models
+optivise model-info --model <immutable-id>
+optivise scaffold --model <immutable-id> --profile <profile-id> --project ./my-project
 
-cd ./my-project
-smart-planner validate --dry-run --format json
-# show the manifest and obtain approval
-smart-planner validate --format json
-
-smart-planner solve --dry-run --out-dir results --format json
-# show the manifest and obtain approval
-smart-planner solve --out-dir results --format json
+optivise lint --project ./my-project
+optivise prepare --project ./my-project --out ./my-project/manifest.solve.json
+# after one final business confirmation
+optivise run --manifest ./my-project/manifest.solve.json --approve <manifest_id> --wait 60 --out ./my-project/results
 ```
 
 For long jobs:
 
 ```bash
-smart-planner solve --dry-run --format json
-smart-planner solve --async --format json
-smart-planner runs wait --run-id <run_id> --timeout 60 --format json
-smart-planner runs download --run-id <run_id> --out-dir results --format json
+optivise status --run <run_id>
+optivise explain --run <run_id> --format detailed
 ```
 
-The `--dry-run` command is the approval boundary. It reads the selected files and fetches the model descriptor, but it does not submit a run or write result files.
+`prepare` reads the selected files and fetches the model descriptor, but it does not submit a run or write result files. The customer approval boundary is the first solve submission. `run` reads project, model, profile, mode, and files from the approved manifest. A technical operator may still use `dryrun --mode validate` when explicitly needed.
+
+If artifact retrieval fails, the CLI publishes no partial result batch. Retry `fetch`; never recreate files from previews or summaries.

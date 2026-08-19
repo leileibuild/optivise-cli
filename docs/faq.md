@@ -2,7 +2,7 @@
 
 ## Does it send my data?
 
-Only an explicit `validate` or `solve` request sends the named CSV datasets and configuration shown by `--dry-run`. Dry-run fetches the public model descriptor needed to determine required datasets, then stops before the submission `POST`. It does not upload files or write solver artifacts.
+Only an explicit approved `run` sends the named CSV datasets and configuration shown by `prepare`. Preparation fetches the public model descriptor needed to determine required datasets, then stops before submission. It does not upload files or write result artifacts.
 
 ## Does it run in the background?
 
@@ -18,7 +18,7 @@ No. The client can describe what it sends, but it cannot promise service-side re
 
 ## Can an agent submit without me?
 
-The skill workflow requires dry-run, showing the manifest, and explicit user approval before `validate` or `solve`. Whether an agent can invoke a local command runner depends on the platform and its permissions.
+The skill workflow requires dryrun, showing the manifest, and explicit user approval before `run`. Whether an agent can invoke a local command runner depends on the platform and its permissions.
 
 ## Is the hosted solver free?
 

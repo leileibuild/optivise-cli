@@ -5,5 +5,5 @@
 Prompt:
 
 ```text
-Use the smart-planner-cli skill. Read project.yaml, config.json, and data/*.csv, run a dry-run, show the manifest, ask for approval, then submit the approved solve and report the result files.
+Use the optivise-cli skill. Read only named inputs, choose an immutable v3 model/profile, create mapping.json, run `optivise lint` and `optivise dryrun`, show the manifest, ask for approval, then submit the approved run and report the result files.
 ```

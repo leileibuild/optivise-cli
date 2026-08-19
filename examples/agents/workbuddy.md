@@ -5,5 +5,5 @@
 Prompt:
 
 ```text
-Use $smart-planner-cli. Prepare the named CSV data, show the JSON dry-run manifest, obtain my approval, then run the approved Optivise command. Never submit from dry-run.
+Use $optivise-cli. Prepare named CSV or JSON data, show the JSON dryrun manifest, obtain my approval, then run the approved Optivise command. Never submit from dryrun.
 ```

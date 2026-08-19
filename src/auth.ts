@@ -18,20 +18,22 @@ export interface UserConfig {
   backendUrl: string;
 }
 
-const IDENTITY_DIR = join(homedir(), '.smartplanner');
-const IDENTITY_PATH = join(IDENTITY_DIR, 'identity.json');
-const SESSION_PATH = join(IDENTITY_DIR, 'session.json');
-const CONFIG_PATH = join(IDENTITY_DIR, 'config.json');
+// Replaced in dist/auth.js by scripts/inject-packaged-backend.mjs.
+export const PACKAGED_BACKEND_URL = '__OPTIVISE_PACKAGED_BACKEND_URL__';
+
+function identityDir(): string { return process.env.OPTIVISE_HOME?.trim() || join(homedir(), '.optivise'); }
+function identityPath(name: string): string { return join(identityDir(), name); }
 
 export function ensureIdentityDir(): void {
-  mkdirSync(IDENTITY_DIR, { recursive: true });
+  mkdirSync(identityDir(), { recursive: true });
 }
 
 export function loadConfig(): UserConfig | null {
-  if (!existsSync(CONFIG_PATH)) {
+  const path = identityPath('config.json');
+  if (!existsSync(path)) {
     return null;
   }
-  return JSON.parse(readFileSync(CONFIG_PATH, 'utf8')) as UserConfig;
+  return JSON.parse(readFileSync(path, 'utf8')) as UserConfig;
 }
 
 export function resolveBackendUrl(explicit?: string): UserConfig {
@@ -46,40 +48,47 @@ export function resolveBackendUrl(explicit?: string): UserConfig {
   if (fromEnv) {
     return { backendUrl: normalizeBackendUrl(fromEnv) };
   }
-  throw new Error('Missing backend URL. Run: smart-planner login --backend-url <url>');
+  if (PACKAGED_BACKEND_URL && !PACKAGED_BACKEND_URL.startsWith('__OPTIVISE_')) {
+    return { backendUrl: normalizeBackendUrl(PACKAGED_BACKEND_URL) };
+  }
+  throw new Error('backend_not_configured');
 }
 
 export function saveConfig(config: UserConfig): void {
   ensureIdentityDir();
-  writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), 'utf8');
+  writeFileSync(identityPath('config.json'), JSON.stringify(config, null, 2), 'utf8');
 }
 
 export function loadSession(): Session | null {
-  if (!existsSync(SESSION_PATH)) {
+  const path = identityPath('session.json');
+  if (!existsSync(path)) {
     return null;
   }
-  return JSON.parse(readFileSync(SESSION_PATH, 'utf8')) as Session;
+  return JSON.parse(readFileSync(path, 'utf8')) as Session;
 }
 
 export function saveSession(session: Session): void {
   ensureIdentityDir();
-  writeFileSync(SESSION_PATH, JSON.stringify(session, null, 2), 'utf8');
+  const path = identityPath('session.json');
+  writeFileSync(path, JSON.stringify(session, null, 2), 'utf8');
   try {
-    chmodSync(SESSION_PATH, 0o600);
+    chmodSync(path, 0o600);
   } catch {
     // Windows may not support chmod the same way.
   }
 }
 
 export function deleteIdentity(): void {
-  if (existsSync(IDENTITY_PATH)) {
-    unlinkSync(IDENTITY_PATH);
+  const path = identityPath('identity.json');
+  if (existsSync(path)) {
+    unlinkSync(path);
   }
 }
 
 export function deleteSession(): void {
-  if (existsSync(SESSION_PATH)) {
-    unlinkSync(SESSION_PATH);
+  const path = identityPath('session.json');
+  if (existsSync(path)) {
+    unlinkSync(path);
   }
 }
 

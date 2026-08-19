@@ -5,5 +5,5 @@
 Prompt:
 
 ```text
-Use smart-planner-cli in this workspace. Run dry-run first, show endpoint, model, files, hashes, and expected writes, ask for approval, then submit only the approved run and return the run ID.
+Use optivise-cli in this workspace. Run dryrun first, show endpoint, model, files, hashes, and expected writes, ask for approval, then submit only the approved run and return the run ID.
 ```

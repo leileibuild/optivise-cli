@@ -5,5 +5,5 @@
 Prompt:
 
 ```text
-请使用 smart-planner-cli：先检查项目数据，运行 solve --dry-run，完整展示请求清单并等待我确认；确认后再提交，并用中文总结求解状态和输出文件。
+请使用 optivise-cli：只读取我明确指定的数据，选择 immutable v3 模型和 profile，运行 lint 和 dryrun，完整展示 manifest 并等待我确认；确认后再 run，并用中文总结 result 和输出文件。
 ```

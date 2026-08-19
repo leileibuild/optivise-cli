@@ -11,15 +11,23 @@ export interface V3ModelSummary {
   description: string;
   adapter_revision: string;
   solver_compatibility: string[];
-  datasets: Array<{ name: string; description?: string; required?: boolean }>;
-  result_datasets: Array<{ name: string; description?: string }>;
+  family?: string;
+  decision_pattern?: string;
+  when_to_use?: string[];
+  when_not_to_use?: string[];
+  profiles?: Array<{ id: string; name?: string; description?: string; required_datasets?: string[]; use_cases?: string[] }>;
+  limits?: Record<string, unknown>;
 }
 
 export interface V3ModelDescriptor extends V3ModelSummary {
+  datasets: Array<{ name: string; description?: string; required?: boolean; max_rows?: number; max_bytes?: number; fields?: Array<{ name: string; type: string; nullable?: boolean; description?: string; examples?: unknown[]; enum_values?: string[] }> }>;
+  result_datasets: Array<{ name: string; description?: string }>;
   config_schema: Record<string, unknown>;
-  constraints: Array<{ id: string; label: string; description?: string; default?: boolean }>;
-  objectives: Array<{ id: string; label: string; description?: string; default?: boolean }>;
+  constraints: Array<{ id: string; name?: string; label?: string; description?: string; default_enabled?: boolean; required_datasets?: string[] }>;
+  objectives: Array<{ id: string; name?: string; label?: string; description?: string; default_enabled?: boolean; default_weight?: number; minimum_weight?: number; maximum_weight?: number; required_datasets?: string[] }>;
   examples?: Array<{ config?: Record<string, unknown> }>;
+  key_decision_datasets?: string[];
+  structural_invariants?: unknown[];
 }
 
 export interface V3ValidationError {
@@ -47,18 +55,18 @@ export interface V3Artifact {
 export interface V3Run {
   run_id: string;
   mode: 'validate' | 'solve';
-  state: 'queued' | 'running' | 'succeeded' | 'failed';
+  state: 'queued' | 'running' | 'cancelling' | 'cancelled' | 'succeeded' | 'failed';
   phase: string;
   progress: number;
   model_id: string;
   resolved_config?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
   errors?: V3ValidationError[];
-  summary?: Record<string, unknown>;
   artifacts?: V3Artifact[];
   previews?: Record<string, Array<Record<string, unknown>>>;
   validation_report?: Record<string, unknown>;
   build_summary?: { model_built: boolean };
+  result?: Record<string, unknown>;
 }
 
 export interface CreateV3RunRequest {
@@ -182,7 +190,7 @@ export class V3ApiClient {
       if (options.onProgress) {
         options.onProgress(run);
       }
-      if (run.state === 'succeeded' || run.state === 'failed') {
+      if (run.state === 'succeeded' || run.state === 'failed' || run.state === 'cancelled') {
         return { run, timedOut: false };
       }
       if (maxWaitMs != null && Date.now() - startedAt >= maxWaitMs) {
@@ -200,7 +208,7 @@ export class V3ApiClient {
       }
     }
     const { run } = await this.getRun(runId);
-    return { run, timedOut: run.state !== 'succeeded' && run.state !== 'failed' };
+    return { run, timedOut: run.state !== 'succeeded' && run.state !== 'failed' && run.state !== 'cancelled' };
   }
 
   async downloadArtifact(runId: string, artifactId: string): Promise<string> {
@@ -215,6 +223,18 @@ export class V3ApiClient {
       throw new Error(`Download artifact failed (${resp.status}): ${await resp.text()}`);
     }
     return resp.text();
+  }
+
+  async cancelRun(runId: string): Promise<Record<string, unknown>> {
+    const resp = await fetchWithTimeout(this.url(`/v3/runs/${encodeURIComponent(runId)}/cancel`), { method: 'POST', headers: this.authHeaders() });
+    if (!resp.ok) throw new Error(`Cancel run failed (${resp.status}): ${await resp.text()}`);
+    return await resp.json() as Record<string, unknown>;
+  }
+
+  async listRuns(): Promise<Record<string, unknown>> {
+    const resp = await fetchWithTimeout(this.url('/v3/runs'), { headers: this.authHeaders() });
+    if (!resp.ok) throw new Error(`List runs failed (${resp.status}): ${await resp.text()}`);
+    return await resp.json() as Record<string, unknown>;
   }
 }
 

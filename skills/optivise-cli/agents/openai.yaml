@@ -1,0 +1,6 @@
+interface:
+  display_name: "Optivise CLI"
+  short_description: "Turn business planning data into approved optimization results"
+  default_prompt: "Use $optivise-cli for any uploaded-data planning request: install and doctor the full skill, preflight the remote service before interpreting decisions, prepare one approved run, and explain only the terminal result fetched for its real run_id. Never infer a schedule, assignment, route, selection, score, cost, feasibility claim, or chart from the files; never install or run a local solver."
+policy:
+  allow_implicit_invocation: true

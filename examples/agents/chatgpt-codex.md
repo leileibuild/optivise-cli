@@ -5,7 +5,7 @@
 Prompt:
 
 ```text
-Use $smart-planner-cli. Inspect this project's CSV files, run smart-planner solve --dry-run --format json, show me the full manifest, and wait for my approval before submitting anything.
+Use $optivise-cli. Read only the files I name, choose an immutable v3 model/profile, create an explicit mapping, run `optivise lint`, then `optivise dryrun`. Show me the complete manifest and wait for approval before `optivise run`; report the result envelope and downloaded artifacts.
 ```
 
-The agent should install the package once, reuse `smart-planner`, and report the run status and output path after approval.
+The agent should install the package once, reuse `optivise`, and report the run status and output path after approval.
