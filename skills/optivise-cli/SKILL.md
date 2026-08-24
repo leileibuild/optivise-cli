@@ -11,7 +11,7 @@ Use Optivise as the execution service. The agent understands the user's business
 
 This is a remote calculation workflow. The uploaded npm tarball is the only local tool to install. **Never install, import, download, or run a local optimization runtime** while handling an Optivise request. In particular, never run `pip`, `pip3`, `uv`, `conda`, `brew`, `apt`, `npm install` for a solver, Python OR-Tools, PyJobShop, CP-SAT, Routing, or any package described as an optimization/solver tool. Never write a Python or JavaScript script that computes an assignment, schedule, selection, or route.
 
-After the CLI and skill are installed, the first action for an uploaded-data request is a read-only `optivise describe-models`/`model-info` preflight. If that command cannot reach Smart Planner, stop and say that calculation is temporarily unavailable; do not try to repair the environment or substitute a local calculation. Do not tell a business user to provide a backend URL. A local package-manager or solver-install action is always a hard failure, even when the input is small.
+After the CLI and skill are installed, the first action for an uploaded-data request is a read-only `optivise describe-models`/`model-info` preflight. If the first call cannot reach Smart Planner, follow the bounded connectivity recovery below before declaring the service unavailable. Never substitute a local calculation. Do not tell a business user to provide a backend URL. A local package-manager or solver-install action is always a hard failure, even when the input is small.
 
 **Provenance is a state machine, not a suggestion.** Keep an internal state for the task: `unconfigured -> preflight_ok -> prepared -> approved -> submitted -> fetched`. A business result is permitted only in `fetched`. Generic attachment readers, spreadsheets, arithmetic, charts, code execution, or another agent may help inspect names, headers, row counts, and missing values, but they must never produce a proposed assignment, schedule, route, selection, score, cost, feasibility statement, or chart that depicts a decision. Do not call anything “最优”, “可行”, “方案”, or “结果” before `submitted` has returned a `run_id` and `fetched` has verified the same run's terminal result and artifact. If the state is earlier than `fetched`, stop the decision explanation and say: “还没有生成远程求解结果，我不会根据文件内容自行推算排程。”
 
@@ -36,6 +36,18 @@ optivise setup --target workpartner
 ```
 
 For Codex, replace `workpartner` with `codex`. If the host uses a non-default skill root, pass it with `--dir`. After setup, reread the installed `optivise-cli/SKILL.md` before handling a business optimization request in the same task. If setup fails or the installed rules cannot be loaded, do not claim readiness and do not attempt the optimization from general reasoning.
+
+## Connectivity preflight and bounded recovery
+
+Treat a bare `fetch failed` as ambiguous: it can mean an unresolved packaged/default backend, missing per-environment configuration, or a serverless cold start. Do not report a service outage until these checks are complete:
+
+1. Confirm setup returned `ready: true`, then inspect the configuration in the same agent environment that runs the CLI. The file is `${OPTIVISE_HOME}/config.json` when `OPTIVISE_HOME` is set, otherwise `~/.optivise/config.json`. Sandboxes, IDE agents, and host terminals may have different homes; configuration in one environment is not proof that another can see it.
+2. Require a non-empty HTTPS `backendUrl`. If it is absent or wrong and an approved URL is already supplied by product documentation, the installer, or a technical operator, run `optivise configure --backend-url <approved-backend-url>` in that same environment. The option is `--backend-url`, not `--backend`. Never invent or discover an endpoint, configure an arbitrary host, copy session credentials, or ask a non-technical business user for this value.
+3. Use the same installed package invocation for `configure` and `describe-models`. Do not silently mix a global binary with a package runner. If they behave differently, compare versions and executable origins, then use the exact package supplied or installed for the task.
+4. When the approved backend is serverless or cold start is plausible, make one bounded `GET <backend-url>/health` warm-up with a timeout of at most 180 seconds, then retry `describe-models` once. The CLI request timeout can expire before a cold instance is ready.
+5. Continue only when `describe-models` returns a non-empty model list and `model-info` succeeds. If the warm-up or retry still fails, stop and state that calculation is temporarily unavailable and no result was produced.
+
+These checks may read configuration and contact only the already-approved Optivise backend. They do not authorize installing a solver, changing shell profiles, searching for alternate backends, or submitting business data.
 
 ## Visible execution versus customer replies
 
@@ -109,9 +121,15 @@ Internally follow:
 
 `describe-models` -> `model-info` -> `scaffold`/`schema-template` -> explicit mapping and config -> `lint` -> `prepare`
 
+Read `semantic_boundaries` from `model-info` before mapping data or choosing a profile. Treat `not_supported`, `important_assumptions`, and `configuration_effects` as part of the base model contract, not optional documentation. If the business requires a listed unsupported decision semantics, stop before preparation and explain the mismatch; do not wait for an infeasible or misleading solve to reveal it.
+
 Use v3 `RunConfig`: constraints are booleans; objectives are `{enabled, weight}` with positive finite weights; solver fields are `max_time_in_seconds`, `num_workers`, `random_seed`, and `log_search_progress`. Do not use legacy `weights`, boolean objectives, inferred joins, expressions, or scripts.
 
-Use `convert` for source-to-target data preparation. Declare `types: {<field>: "boolean"}` for boolean target fields so common source spellings are serialized as lowercase `true` or `false`. Do not hand-write canonical target CSV when an explicit mapping can produce it. Treat any descriptor-level lint or prepare diagnostic as preparation work: correct it before asking for solve approval.
+Use `convert` for source-to-target data preparation. Declare `types: {<field>: "boolean"}` for boolean target fields so common source spellings are serialized as lowercase `true` or `false`. Do not hand-write canonical target CSV when an explicit mapping can produce it. Treat any descriptor-level lint or prepare error as preparation work: correct it before asking for solve approval.
+
+`lint` and `prepare` may return non-blocking `warnings`. A warning is not a solver result and must not be silently ignored: resolve it or explain its business effect before asking for solve approval. When `dataset_ignored_by_disabled_constraint` reports `resource_unavailability` with `resource_availability` disabled, state in business language that the submitted shift, maintenance, or downtime calendar will not constrain this run and the schedule may cross those periods. Ask whether that is intentional; if the calendar is a hard rule, enable the constraint and rerun both `lint` and `prepare`.
+
+For finite-capacity scheduling, the current base model schedules each operation as one uninterrupted interval. If `semantic_boundaries.not_supported` says preemption is unsupported and the business requires an operation to pause across downtime and resume later, do not simulate that meaning by arbitrarily splitting CSV rows. Explain that the base model does not express the requirement and use a model that explicitly supports calendar-aware preemption or request a model extension.
 
 Preparation and read-only model calls do not require user approval. `prepare` always creates a solve manifest and never submits a run. Do not pass `--profile` or `--mode` to it. Do not interrupt the customer with commands, model IDs, profiles, JSON, hashes, manifests, or implementation progress.
 
@@ -161,6 +179,19 @@ First verify that the response contains the same real `run_id` and an authoritat
 2. state the main outcome and trade-offs in a few sentences;
 3. call out unmet demand, binding limitations, or caveats;
 4. mention downloadable files last.
+
+For `status=infeasible`, do not use the feasible-result template and do not invent a candidate schedule. Explain only the returned `infeasibility_diagnosis`:
+
+- State that the enabled hard rules cannot all be satisfied; do not describe this as a service failure.
+- `conflicts` contains only evidence mapped to business records. State a high-confidence conflict directly; describe a medium-confidence item as mapped evidence, not the unique root cause. Translate its business IDs, source fields, and supported adjustments into the user's vocabulary.
+- Prefer the submitted business identifiers in `business_entities` and the input values in `business_evidence`; do not substitute internal names or metadata. For a `calendar_contiguity` conflict, explain that the current model requires each operation to run without interruption, then state the operation's required continuous minutes, the candidate resource's longest continuous available period, and the shortfall.
+- A returned “at least N minutes” adjustment means only that this one operation can obtain a non-empty candidate time domain after that change. It does not prove that the complete schedule will become feasible or that N is enough for every affected operation.
+- Present calendar-contiguity adjustments as business choices: extend a compatible resource's continuous working period, add another compatible resource, correct the submitted duration or calendar if it is inaccurate, or confirm that the operation may pause across unavailable periods so a calendar-aware preemptive model can be used. Never recommend disabling all calendars as a normal business fix.
+- `solver_symptoms` means no reliable business-level conflict was identified. Report what the solver observed, then label every `possible_explanation` as a possibility. Ask the user or another agent to combine the checks with domain knowledge; never select one possibility as the cause without new evidence.
+- `assumption_core.status=available` is sufficient but not necessarily smallest or unique. `partial`, `not_available`, and `unreliable` must not be used for business attribution. In particular, do not turn mandatory items returned by an unreliable core into recommendations to drop those items.
+- A zero search-conflict or propagation count after a presolve proof means search did not start; it does not mean the model had no contradictory rules. Search statistics describe solver behavior, not business causality.
+- Only repeat adjustments included under an explicit conflict. Symptom `recommended_checks` are investigation steps, not solver-proven relaxations.
+- Do not expose raw solver logs, proto details, hashes, constraint indices, assumption group names, internal model IDs, or result `meta` in the customer reply.
 
 Name every successfully fetched non-empty business file and describe its purpose. If fetching fails, do not provide a locally reconstructed substitute.
 

@@ -23,6 +23,7 @@ export function toAgentSpecBundle(descriptor: V3ModelDescriptor): Record<string,
     config_schema: descriptor.config_schema,
     constraints: descriptor.constraints ?? [],
     objectives: descriptor.objectives ?? [],
+    semantic_boundaries: descriptor.semantic_boundaries ?? {},
     examples: descriptor.examples ?? [],
     workflow: [
       'optivise model-info --model <model_id>',

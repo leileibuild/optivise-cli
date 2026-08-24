@@ -35,6 +35,20 @@ export class DatasetValidationError extends Error {
   }
 }
 
+export function populatedCsvColumns(path: string, columns: string[]): string[] {
+  try {
+    const table = parseStrictCsv(readFileSync(path, 'utf8'));
+    return columns.filter((column) => {
+      const index = table.headers.indexOf(column);
+      return index >= 0 && table.records.some((record) => (record.values[index] ?? '').trim() !== '');
+    });
+  } catch {
+    // The normal dataset validator reports malformed CSV; warning detection
+    // must not turn the same issue into a misleading configuration failure.
+    return [];
+  }
+}
+
 function parseStrictCsv(text: string): CsvTable {
   const source = text.replace(/^\uFEFF/, '');
   const rows: CsvRecord[] = [];

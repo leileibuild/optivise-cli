@@ -15,11 +15,16 @@ test('toAgentSpecBundle maps v3 descriptor for agents', () => {
     config_schema: { type: 'object' },
     constraints: [{ id: 'capacity_limit', label: 'Limit', default: true }],
     objectives: [{ id: 'maximize_priority', label: 'Priority', default: true }],
+    semantic_boundaries: { supported: ['continuous operation'], not_supported: ['preemption'] },
   });
   assert.equal(bundle.model_id, 'capacity-planning@sha256:abc');
   assert.equal(bundle.datasets[0].csv_filename, 'work_items.csv');
   assert.ok(Array.isArray(bundle.workflow));
   assert.ok(Array.isArray(bundle.validate_rules));
+  assert.deepEqual(bundle.semantic_boundaries, {
+    supported: ['continuous operation'],
+    not_supported: ['preemption'],
+  });
   assert.deepEqual(bundle.customer_communication.result_gate, [
     'Require a real run_id, terminal status for that run, and result/artifact provenance before presenting any recommendation or decision file',
     'Without those facts, only ask a necessary business clarification or state that no result has been produced',

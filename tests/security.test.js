@@ -118,6 +118,39 @@ test('dry-run rejects non-canonical booleans before any run submission', async (
   });
 });
 
+test('dry-run returns an LLM-readable warning for ignored calendar data', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'optivise-calendar-dry-run-'));
+  const dataDir = join(root, 'data');
+  mkdirSync(dataDir);
+  writeFileSync(join(dataDir, 'work_items.csv'), 'work_item_id,workload\nA,1\n', 'utf8');
+  writeFileSync(join(dataDir, 'resource_unavailability.csv'), 'resource_id,start_at,end_at,capacity_reduction\nR1,2026-01-01T00:00:00Z,2026-01-01T01:00:00Z,1\n', 'utf8');
+  const calendarAwareDescriptor = {
+    ...descriptor,
+    datasets: [
+      ...descriptor.datasets,
+      { name: 'resource_unavailability', required: false, fields: [] },
+    ],
+    constraints: [{
+      id: 'resource_availability',
+      default_enabled: false,
+      required_datasets: ['resource_unavailability'],
+    }],
+  };
+  await withMockFetch(async () => new Response(JSON.stringify(calendarAwareDescriptor), {
+    headers: { 'Content-Type': 'application/json' },
+  }), async (backendUrl) => {
+    const manifest = await buildV3DryRun({
+      modelId: calendarAwareDescriptor.model_id,
+      dataDir,
+      mode: 'solve',
+      userConfig: { backendUrl },
+    });
+    assert.equal(manifest.warnings.length, 1);
+    assert.equal(manifest.warnings[0].code, 'dataset_ignored_by_disabled_constraint');
+    assert.deepEqual(manifest.request.datasets.map((item) => item.dataset), ['work_items']);
+  });
+});
+
 test('dataset names and escaping symlinks are rejected', () => {
   const root = mkdtempSync(join(tmpdir(), 'optivise-path-'));
   const dataDir = join(root, 'data');

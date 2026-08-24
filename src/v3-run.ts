@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, w
 import { basename, dirname, join, resolve } from 'node:path';
 
 import type { Session, UserConfig } from './auth.js';
-import { DatasetValidationError, validateDatasetFiles } from './dataset-validation.js';
+import { DatasetValidationError, populatedCsvColumns, validateDatasetFiles } from './dataset-validation.js';
 import {
   collectCsvFiles,
   discoverCsvFiles,
@@ -74,6 +74,72 @@ export function loadRunConfig(configPath?: string): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
+export interface V3PreparationWarning extends Record<string, unknown> {
+  code: string;
+  severity: 'warning';
+  dataset: string;
+  constraint: string;
+  ignored_inputs: Array<{ dataset: string; fields?: string[] }>;
+  message: string;
+  business_impact: string;
+  suggestion: string;
+}
+
+function configuredTermIsEnabled(
+  term: { id: string; default_enabled?: boolean },
+  config: Record<string, unknown>,
+  profile: { constraints?: Record<string, boolean>; objectives?: Record<string, { enabled?: boolean }> } | undefined,
+): boolean {
+  const constraints = config.constraints && typeof config.constraints === 'object'
+    ? config.constraints as Record<string, unknown>
+    : {};
+  const objectives = config.objectives && typeof config.objectives === 'object'
+    ? config.objectives as Record<string, { enabled?: boolean }>
+    : {};
+  if (term.id in constraints) return constraints[term.id] === true;
+  if (term.id in objectives) return objectives[term.id]?.enabled === true;
+  if (term.id in (profile?.constraints ?? {})) return profile?.constraints?.[term.id] === true;
+  if (term.id in (profile?.objectives ?? {})) return profile?.objectives?.[term.id]?.enabled === true;
+  return term.default_enabled !== false;
+}
+
+export function collectV3PreparationWarnings(
+  dataDir: string,
+  descriptor: Awaited<ReturnType<V3ApiClient['getModel']>>,
+  config: Record<string, unknown>,
+): V3PreparationWarning[] {
+  const availabilityDataset = descriptor.datasets.find((item) => item.name === 'resource_unavailability');
+  const constraint = descriptor.constraints.find((item) => item.id === 'resource_availability');
+  const profileId = typeof config.profile_id === 'string' ? config.profile_id : undefined;
+  const profile = profileId ? descriptor.profiles?.find((item) => item.id === profileId) : undefined;
+  if (!availabilityDataset || !constraint || configuredTermIsEnabled(constraint, config, profile)) {
+    return [];
+  }
+  const ignoredInputs: Array<{ dataset: string; fields?: string[] }> = [];
+  if (existsSync(join(dataDir, 'resource_unavailability.csv'))) {
+    ignoredInputs.push({ dataset: 'resource_unavailability' });
+  }
+  const resourcesPath = join(dataDir, 'resources.csv');
+  const calendarFields = existsSync(resourcesPath)
+    ? populatedCsvColumns(resourcesPath, ['calendar_start_at', 'calendar_end_at'])
+    : [];
+  if (calendarFields.length) ignoredInputs.push({ dataset: 'resources', fields: calendarFields });
+  if (!ignoredInputs.length) return [];
+  const inputSummary = ignoredInputs.map((item) => item.fields?.length
+    ? item.fields.map((field) => `${item.dataset}.${field}`).join(', ')
+    : `${item.dataset}.csv`).join('; ');
+  return [{
+    code: 'dataset_ignored_by_disabled_constraint',
+    severity: 'warning',
+    dataset: ignoredInputs[0].dataset,
+    constraint: constraint.id,
+    ignored_inputs: ignoredInputs,
+    message: `Found calendar inputs (${inputSummary}), but resource_availability is disabled. These inputs will not be applied to this scheduling run.`,
+    business_impact: 'If the rows represent real shifts, maintenance, or downtime, the schedule may cross those unavailable periods or shift boundaries.',
+    suggestion: 'Confirm that the calendar is intentionally informational. If it is a hard business rule, enable resource_availability and rerun lint/prepare.',
+  }];
+}
+
 async function prepareRun(
   dataDir: string,
   modelId: string,
@@ -83,6 +149,7 @@ async function prepareRun(
   descriptor: Awaited<ReturnType<V3ApiClient['getModel']>>;
   csvFiles: Array<{ dataset: string; path: string }>;
   config: Record<string, unknown>;
+  warnings: V3PreparationWarning[];
 }> {
   const descriptor = await client.getModel(modelId);
   const config = loadRunConfig(configPath);
@@ -91,20 +158,8 @@ async function prepareRun(
   const profile = profileId ? descriptor.profiles?.find((item) => item.id === profileId) : undefined;
   if (profileId && !profile) throw new Error(`Unknown profile: ${profileId}`);
   for (const dataset of profile?.required_datasets ?? []) required.add(dataset);
-  const constraintConfig = (config.constraints && typeof config.constraints === 'object' ? config.constraints : {}) as Record<string, unknown>;
-  const objectiveConfig = (config.objectives && typeof config.objectives === 'object' ? config.objectives : {}) as Record<string, any>;
   for (const term of [...(descriptor.constraints ?? []), ...(descriptor.objectives ?? [])]) {
-    const profileConstraints = (profile as any)?.constraints ?? {};
-    const profileObjectives = (profile as any)?.objectives ?? {};
-    const active = term.id in constraintConfig
-      ? constraintConfig[term.id] === true
-      : term.id in objectiveConfig
-        ? Boolean(objectiveConfig[term.id]?.enabled)
-        : term.id in profileConstraints
-          ? profileConstraints[term.id] === true
-          : term.id in profileObjectives
-            ? Boolean(profileObjectives[term.id]?.enabled)
-            : (term as any).default_enabled !== false;
+    const active = configuredTermIsEnabled(term, config, profile);
     if (active) for (const dataset of term.required_datasets ?? []) required.add(dataset);
   }
   const requiredDatasets = [...required];
@@ -123,11 +178,12 @@ async function prepareRun(
   }
   const diagnostics = validateDatasetFiles(descriptor, csvFiles);
   if (diagnostics.length) throw new DatasetValidationError(diagnostics);
-  return { descriptor, csvFiles, config };
+  return { descriptor, csvFiles, config, warnings: collectV3PreparationWarnings(dataDir, descriptor, config) };
 }
 
 export interface V3DryRunManifest {
   dry_run: true;
+  warnings: V3PreparationWarning[];
   target: {
     backend: string;
     descriptor_endpoint: string;
@@ -170,6 +226,7 @@ export async function buildV3DryRun(options: {
 
   return {
     dry_run: true,
+    warnings: prepared.warnings,
     target: {
       backend: options.userConfig.backendUrl,
       descriptor_endpoint: descriptorEndpoint,

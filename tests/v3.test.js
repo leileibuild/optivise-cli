@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   buildAsyncSubmitPayload,
   buildRunStatusPayload,
+  collectV3PreparationWarnings,
   downloadArtifactsAtomically,
   formatV3Error,
   isTerminalRunState,
@@ -12,6 +13,7 @@ import {
   resolveOutDir,
 } from '../dist/v3-run.js';
 import { collectCsvFiles, discoverCsvFiles } from '../dist/v3-client.js';
+import { buildExplainPayload } from '../dist/explain.js';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -43,6 +45,72 @@ test('discoverCsvFiles finds csv files in directory', () => {
   writeFileSync(join(dir, 'operations.csv'), 'op\n1\n', 'utf8');
   const files = discoverCsvFiles(dir);
   assert.equal(files[0].dataset, 'operations');
+});
+
+const calendarDescriptor = {
+  model_id: 'capacity-scheduling@sha256:test',
+  name: 'Finite-capacity scheduling',
+  description: 'Schedule operations.',
+  adapter_revision: 'builtin-test',
+  solver_compatibility: ['cp_sat'],
+  datasets: [
+    { name: 'resources', required: true },
+    { name: 'resource_unavailability', required: false },
+  ],
+  result_datasets: [],
+  config_schema: {},
+  constraints: [{ id: 'resource_availability', default_enabled: false, required_datasets: ['resources', 'resource_unavailability'] }],
+  objectives: [],
+  profiles: [
+    { id: 'production', constraints: { resource_availability: false } },
+    { id: 'maintenance', constraints: { resource_availability: true } },
+  ],
+};
+
+test('preparation warning explains ignored calendar data without invalidating input', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optivise-calendar-warning-'));
+  writeFileSync(join(dir, 'resource_unavailability.csv'), 'resource_id,start_at,end_at,capacity_reduction\nR1,2026-01-01T00:00:00Z,2026-01-01T01:00:00Z,1\n', 'utf8');
+  const warnings = collectV3PreparationWarnings(dir, calendarDescriptor, { profile_id: 'production' });
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0].code, 'dataset_ignored_by_disabled_constraint');
+  assert.equal(warnings[0].severity, 'warning');
+  assert.equal(warnings[0].dataset, 'resource_unavailability');
+  assert.equal(warnings[0].constraint, 'resource_availability');
+  assert.deepEqual(warnings[0].ignored_inputs, [{ dataset: 'resource_unavailability' }]);
+  assert.match(warnings[0].message, /will not be applied/);
+  assert.match(warnings[0].business_impact, /schedule may cross/);
+  assert.match(warnings[0].suggestion, /enable resource_availability/);
+});
+
+test('preparation warning follows profile defaults and explicit overrides', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optivise-calendar-switch-'));
+  writeFileSync(join(dir, 'resource_unavailability.csv'), 'resource_id,start_at,end_at,capacity_reduction\n', 'utf8');
+  assert.deepEqual(collectV3PreparationWarnings(dir, calendarDescriptor, { profile_id: 'maintenance' }), []);
+  assert.equal(collectV3PreparationWarnings(dir, calendarDescriptor, {
+    profile_id: 'maintenance',
+    constraints: { resource_availability: false },
+  }).length, 1);
+  assert.deepEqual(collectV3PreparationWarnings(dir, calendarDescriptor, {
+    profile_id: 'production',
+    constraints: { resource_availability: true },
+  }), []);
+});
+
+test('preparation warning is absent when no calendar file is present', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optivise-calendar-absent-'));
+  assert.deepEqual(collectV3PreparationWarnings(dir, calendarDescriptor, { profile_id: 'production' }), []);
+});
+
+test('preparation warning detects populated calendar fields in resources', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optivise-resource-calendar-'));
+  writeFileSync(join(dir, 'resources.csv'), 'resource_id,calendar_start_at,calendar_end_at\nR1,2026-01-01T08:00:00Z,2026-01-01T17:00:00Z\n', 'utf8');
+  const warnings = collectV3PreparationWarnings(dir, calendarDescriptor, { profile_id: 'production' });
+  assert.equal(warnings[0].dataset, 'resources');
+  assert.deepEqual(warnings[0].ignored_inputs, [{
+    dataset: 'resources',
+    fields: ['calendar_start_at', 'calendar_end_at'],
+  }]);
+  assert.match(warnings[0].message, /resources\.calendar_start_at/);
 });
 
 test('loadRunConfig parses json object', () => {
@@ -95,6 +163,53 @@ test('buildRunStatusPayload marks terminal state', () => {
   });
   assert.equal(payload.terminal, false);
   assert.equal(payload.progress, 40);
+});
+
+test('short infeasible explanation replaces feasible decision fields', () => {
+  const diagnosis = {
+    schema_version: 2,
+    summary: 'Hard constraints conflict.',
+    conflicts: [],
+    solver_symptoms: [],
+    assumption_core: { status: 'available', sufficient: true, minimal: false, business_group_count: 1, note: 'Not necessarily minimal.' },
+    reliability: { exact_business_conflict_identified: true, business_mapping: 'complete', log_truncated: false },
+    residual_uncertainty: null,
+    truncated: false,
+  };
+  const payload = buildExplainPayload({
+    run_id: 'run_infeasible', mode: 'solve', state: 'succeeded', phase: 'completed', progress: 100,
+    model_id: 'm@sha256:abc',
+    result: {
+      status: 'infeasible',
+      feasibility: { feasible: false, proof: 'solver_infeasible', violations: [] },
+      infeasibility_diagnosis: diagnosis,
+    },
+  }, 'short');
+  assert.deepEqual(payload, {
+    run_id: 'run_infeasible', status: 'infeasible', feasible: false, infeasibility_diagnosis: diagnosis,
+  });
+  assert.equal('key_decisions' in payload, false);
+  assert.equal('artifacts' in payload, false);
+  assert.equal('objective_value' in payload, false);
+});
+
+test('detailed infeasible explanation does not expose feasible or raw-log fields', () => {
+  const payload = buildExplainPayload({
+    run_id: 'run_infeasible', mode: 'solve', state: 'succeeded', phase: 'completed', progress: 100,
+    model_id: 'm@sha256:abc',
+    result: {
+      status: 'infeasible',
+      feasibility: { feasible: false, proof: 'solver_infeasible', violations: [] },
+      infeasibility_diagnosis: { schema_version: 2 },
+      meta: { diagnostic_hashes: { 'model.pb': 'abc' } },
+    },
+  }, 'detailed');
+  assert.equal(payload.status, 'infeasible');
+  assert.equal('logs' in payload, false);
+  assert.equal('key_decisions' in payload, false);
+  assert.equal('sensitivity_summary' in payload, false);
+  assert.equal('meta' in payload, false);
+  assert.equal(JSON.stringify(payload).includes('model.pb'), false);
 });
 
 test('artifact batch is published only after every download succeeds', async () => {

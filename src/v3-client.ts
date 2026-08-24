@@ -15,7 +15,15 @@ export interface V3ModelSummary {
   decision_pattern?: string;
   when_to_use?: string[];
   when_not_to_use?: string[];
-  profiles?: Array<{ id: string; name?: string; description?: string; required_datasets?: string[]; use_cases?: string[] }>;
+  profiles?: Array<{
+    id: string;
+    name?: string;
+    description?: string;
+    required_datasets?: string[];
+    use_cases?: string[];
+    constraints?: Record<string, boolean>;
+    objectives?: Record<string, { enabled?: boolean; weight?: number }>;
+  }>;
   limits?: Record<string, unknown>;
 }
 
@@ -28,6 +36,17 @@ export interface V3ModelDescriptor extends V3ModelSummary {
   examples?: Array<{ config?: Record<string, unknown> }>;
   key_decision_datasets?: string[];
   structural_invariants?: unknown[];
+  semantic_boundaries?: {
+    supported?: string[];
+    not_supported?: string[];
+    important_assumptions?: string[];
+    configuration_effects?: Array<{
+      constraint_id: string;
+      when_enabled: string;
+      when_disabled: string;
+      business_impact?: string;
+    }>;
+  };
 }
 
 export interface V3ValidationError {
