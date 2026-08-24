@@ -22,7 +22,7 @@
     "test:smoke": "npm run build && node scripts/smoke-package.mjs"
   },
   "dependencies": {
-    "commander": "^12.1.0"
+    "commander": "^15.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
