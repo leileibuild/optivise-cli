@@ -1,6 +1,6 @@
 {
   "name": "@smart-planner/cli",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Transparent optimization runs for AI agents",
   "type": "module",
   "bin": {
